@@ -2,7 +2,7 @@
   "name": "cvd-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "BINSC-style trading engine with True CVD divergence + absorption strategy",
+  "description": "PAPER runtime + backtester for the real CVD divergence strategy (082F Engine-v2, limit 1-bar)",
   "type": "module",
   "engines": {
     "node": ">=22.14.0"
@@ -13,7 +13,11 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "backtest": "tsx src/backtest/cli.ts",
+    "fetch-data": "tsx src/backtest/fetchKlines.ts",
+    "parity": "tsx tests/parity/runParity.ts",
+    "parity:oracle": "python3 parity/run_oracle.py > tests/fixtures/parity082f.json"
   },
   "dependencies": {
     "decimal.js": "^10.5.0",

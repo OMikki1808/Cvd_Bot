@@ -1,81 +1,83 @@
-import type { ClosedTrade, SizedOrder } from "../domain/types.js";
-import type { AppConfig } from "../config/schema.js";
 import type { AppLogger } from "../logging/logger.js";
+import type { EngineEvent } from "../strategy/engine082f.js";
+import type { NetTrade } from "../portfolio/paperPortfolio.js";
 
 export interface Notifier {
-  notifySizedOrder(order: SizedOrder): Promise<void>;
-  notifyClosed(trade: ClosedTrade): Promise<void>;
+  /** Fire-and-forget: never blocks or throws into the trading loop. */
+  notify(text: string): void;
 }
 
 export class NoopNotifier implements Notifier {
-  async notifySizedOrder(): Promise<void> {}
-  async notifyClosed(): Promise<void> {}
+  notify(): void {}
 }
 
 export class TelegramNotifier implements Notifier {
+  private chain: Promise<void> = Promise.resolve();
+
   constructor(
-    private readonly config: AppConfig,
+    private readonly token: string,
+    private readonly chatId: string,
     private readonly logger: AppLogger,
+    private readonly timeoutMs = 10_000,
   ) {}
 
-  async notifySizedOrder(order: SizedOrder): Promise<void> {
-    const s = order.signal;
-    const text = [
-      `<b>${s.strategyName}</b>`,
-      `${s.symbol} <b>${s.side}</b> ${s.timeframe}`,
-      `entry: ${s.entry.toString()}`,
-      `SL: ${s.stopLoss.toString()}`,
-      `TP: ${s.takeProfit.toString()}`,
-      `RR: ${s.rr.toString()}`,
-      `risk: ${order.riskAmount.toString()} USDT`,
-      `qty: ${order.quantity.toString()}`,
-      `CVD: ${s.cvd.toString()}`,
-      `divergence: ${s.divergence.kind}`,
-      `absorption: ${s.absorption.kind}`,
-      `ts: ${new Date(s.timestamp).toISOString()}`,
-    ].join("\n");
-    await this.send(text);
-  }
-
-  async notifyClosed(trade: ClosedTrade): Promise<void> {
-    const text = [
-      `<b>CLOSED</b> ${trade.position.symbol} ${trade.position.side}`,
-      `reason: ${trade.reason}`,
-      `exit: ${trade.exit.toString()}`,
-      `pnl: ${trade.pnl.toString()}`,
-    ].join("\n");
-    await this.send(text);
+  notify(text: string): void {
+    // Serialize sends to keep message order, but never await from the caller.
+    this.chain = this.chain.then(() => this.send(text)).catch(() => undefined);
   }
 
   private async send(text: string): Promise<void> {
-    const token = this.config.telegramBotToken;
-    const chatId = this.config.telegramChatId;
-    if (!token || !chatId) {
-      return;
-    }
     try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      const res = await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+        body: JSON.stringify({ chat_id: this.chatId, text, parse_mode: "HTML" }),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
       if (!res.ok) {
         this.logger.warn({ status: res.status }, "telegram_send_failed");
       }
     } catch (err) {
-      this.logger.warn({ err }, "telegram_send_failed");
+      this.logger.warn({ err: (err as Error).message }, "telegram_send_failed");
     }
   }
 }
 
-export function createNotifier(config: AppConfig, logger: AppLogger): Notifier {
-  if (!config.telegramBotToken || !config.telegramChatId) {
-    return new NoopNotifier();
-  }
-  return new TelegramNotifier(config, logger);
+export function createNotifier(token: string, chatId: string, logger: AppLogger): Notifier {
+  return token && chatId ? new TelegramNotifier(token, chatId, logger) : new NoopNotifier();
 }
 
-export function formatSizedOrder(order: SizedOrder): string {
-  const s = order.signal;
-  return `${s.strategyName} ${s.symbol} ${s.side} entry=${s.entry.toString()} sl=${s.stopLoss.toString()} tp=${s.takeProfit.toString()} rr=${s.rr.toString()}`;
+const fmt = (x: number, dp = 6): string => Number(x.toPrecision(10)).toFixed(dp).replace(/\.?0+$/, "");
+const iso = (ms: number): string => new Date(ms).toISOString().replace(".000Z", "Z");
+
+export function formatEvent(e: EngineEvent, equity: number, closed?: NetTrade): string | null {
+  switch (e.type) {
+    case "LimitSignal":
+      return [
+        `🟡 <b>LIMIT ${e.side.toUpperCase()}</b> ${e.symbol}`,
+        `entry ${fmt(e.entry)}  SL ${fmt(e.stop)}  TP ${fmt(e.takeProfit)}  RR ${e.rr}`,
+        `risk ${fmt(e.riskCash, 2)} USDT  qty ${fmt(e.qty)}  notional ${fmt(e.notional, 2)}`,
+        `valid until ${iso(e.time + 2 * 3_600_000)}`,
+      ].join("\n");
+    case "PositionOpened":
+      return [
+        `🟢 <b>OPEN ${e.position.side.toUpperCase()}</b> ${e.symbol} (${e.position.fillReason})`,
+        `entry ${fmt(e.position.entry)}  SL ${fmt(e.position.stop)}  TP ${fmt(e.position.takeProfit)}`,
+        `qty ${fmt(e.position.qty)}  notional ${fmt(e.position.qty * e.position.entry, 2)}  risk ${fmt(e.riskCash, 2)}`,
+      ].join("\n");
+    case "PositionClosed": {
+      const t = closed;
+      const net = t ? t.netPnl : e.trade.pnl;
+      return [
+        `${net >= 0 ? "✅" : "🔴"} <b>CLOSED ${e.trade.side.toUpperCase()}</b> ${e.symbol} — ${e.trade.outcome}`,
+        `exit ${fmt(e.trade.exitPrice)}  R ${e.trade.rr.toFixed(2)}`,
+        `pnl ${fmt(e.trade.pnl, 2)}${t ? `  fees ${fmt(t.fees + t.slippage, 2)}  net ${fmt(net, 2)}` : ""}`,
+        `equity ${fmt(equity, 2)} USDT`,
+      ].join("\n");
+    }
+    case "EntryRejected":
+      return `⛔ entry rejected ${e.symbol} ${e.side}: ${e.reason}`;
+    default:
+      return null;
+  }
 }

@@ -1,109 +1,67 @@
 # Cvd_Bot
 
-BINSC-style TypeScript trading engine whose **only** production strategy is
-**True CVD divergence + absorption**.
+TypeScript PAPER runtime + backtester for the **real** CVD divergence strategy
+from `OMikki1808/CVDBot-prodaction`: **082F Engine-v2, limit entry valid 1 bar**
+(`V082F_ENGINE_V2_LIMIT_1BAR`). The port is bit-exact against the Python engine —
+see [docs/STRATEGY_SOURCE.md](docs/STRATEGY_SOURCE.md) for the rules, provenance,
+parity check and known quirks.
 
-PAPER mode is the default. LIVE order routing is compiled out until the
-Before LIVE checklist is complete.
+LIVE trading is not implemented.
 
 ## Architecture
 
 ```
-config → database → exchange
-  → marketData (klines + aggTrades)
-  → True CVD / delta
-  → cvdDivergenceAbsorptionStrategy (per-symbol state)
-  → risk
-  → positions
-  → executor (PAPER)
-  → journal
-  → telegram
-  → reconciliation
+Binance SPOT kline_15m WS ──┐
+Binance SPOT REST (gaps) ───┤→ PaperRuntime (serial queue, recovery mode for replays)
+                            │     → PaperPortfolio (shared equity, fees, slippage, leverage caps)
+                            │          → Engine082fLimit1Bar per symbol (15m → 1H, CVD, pivots,
+                            │            divergence, confirmation, limit order, SL/TP/reverse)
+                            │     → SQLite: engine state, account, idempotent close ledger, events
+                            └     → Telegram (fire-and-forget)
+backtest CLI ──→ same PaperPortfolio/engine on CSV klines
 ```
 
-Composition root: `src/main.ts` (wiring only). Orchestration: `src/app/TradingEngine.ts`.
+| Path | Role |
+| --- | --- |
+| `src/strategy/` | Strategy port + frozen pools (no dependencies, IEEE floats like Python) |
+| `src/portfolio/paperPortfolio.ts` | Shared equity, costs, exposure limits — used by backtest **and** runtime |
+| `src/runtime/paperRuntime.ts` | Live PAPER loop, persistence, gap recovery |
+| `src/exchange/binanceSpot.ts` | REST (timeouts, retries, rate limit) + WS (watchdog) |
+| `src/backtest/` | `fetch-data`, `backtest` CLIs |
+| `tests/parity/`, `parity/` | Bit-exact parity harness against the Python engine |
 
-Old RSI / engulfing strategies (`rsi_body_engulfing_v3`, `rsi_engulfing`,
-`ema_rsi_volume`) are **not** in this repository and are **not** imported.
+## Backtest
 
-## True CVD
-
-Delta is **not** inferred from OHLCV candle shape.
-
-Closed candle:
-
-```
-takerSell = volume - takerBuyBaseAssetVolume
-delta     = takerBuy - takerSell
-CVD       = Σ delta
-```
-
-`takerBuyBaseAssetVolume` is Binance’s official buyer-initiated (taker buy) base volume.
-
-Live forming candle (logging / reconnect restore, not signal entry):
-
-- Stream: `<symbol>@aggTrade`
-- `m` / `isBuyerMaker === true` → seller is taker → negative delta
-- `isBuyerMaker === false` → buyer is taker → positive delta
-
-Signals fire only on **closed** klines (`k.x === true` / REST closed bars).
-The forming candle is never used for entry, SL, or TP.
-
-## Strategy (closed candles, per symbol)
-
-1. Wait for warmup (`CVD_WARMUP_BARS`, default 200).
-2. Confirm fractal pivots (`left` / `right`, default 5/5) — non-repainting.
-3. Regular **bullish** divergence: price lower low, CVD higher low.
-4. Regular **bearish** divergence: price higher high, CVD lower high.
-5. Divergence alone is **HOLD**. A matching **absorption** candle must print
-   within `CVD_CONFIRMATION_WINDOW` bars:
-   - elevated |delta| and volume vs SMA
-   - tight range vs ATR
-   - bullish: negative delta, close in the upper half of the range
-   - bearish: positive delta, close in the lower half
-6. Absorption alone is **HOLD**.
-7. Duplicate `openTime` is ignored. One live position per symbol.
-
-## Risk
-
-```
-riskAmount = equity * RISK_PERCENT / 100
-qty        = floor(riskAmount / |entry - SL|, stepSize)
-TP         = entry ± |entry - SL| * RR
+```bash
+npm ci
+npm run fetch-data -- --from 2025-08-01 --to 2026-08-01          # whole PHASE50 pool → ./data/klines
+npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --out ./bt  # net of costs, shared equity
+npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --gross --isolated   # = Python PHASE48 tables
+npm run backtest  -- --symbols DOGEUSDT,SOLUSDT --fix-immediate-exit --max-total-lev 10
 ```
 
-SL is the divergence pivot extreme, buffered by `CVD_SL_BUFFER_TICKS` and
-rounded to tick size. RR is symbol-specific (`SYMBOL_RR`).
+Binance Vision monthly CSVs (`<SYMBOL>-15m-YYYY-MM.csv`, µs timestamps) can be dropped
+into `./data/klines` as well. See the header of `src/backtest/cli.ts` for all flags.
 
 ## Run (PAPER)
 
 ```bash
 cp .env.example .env
-npm ci
-npm run typecheck
-npm test
+npm ci && npm run typecheck && npm test
 npm start
 ```
 
-Public Binance USD-M kline + aggTrade streams do not need API keys.
-Leave `BINANCE_API_KEY` / `BINANCE_API_SECRET` empty.
+On the first start each symbol is warmed up silently from `WARMUP_DAYS` of REST history.
+After that, state is restored from SQLite and any downtime is refilled from REST
+(replayed bars never open brand-new setups, but pending orders and open
+positions progress through them, as in the Python runtime).
 
 ## Tests
 
 ```bash
-npm test
+npm test          # parity, primitives, state round-trip, backtester, runtime (fake REST/WS + SQLite)
+npm run parity    # parity report only
 ```
 
-Coverage includes CVD / delta / accumulation, pivots, bullish/bearish
-divergence, absorption, LONG/SHORT, HOLD without confirmation, warmup,
-duplicate candles/signals, isolated multi-symbol state, risk sizing,
-symbol RR, SL/TP, paper fills, and resync.
-
-## Source note
-
-This repo was bootstrapped because `AndriiC32/BINSC@cursor/unified-architecture-5078`
-and `OMikki1808/2020@cursor/cvd-strategy-082f` were not readable with the
-cloud-agent GitHub token (404). Formulas here are locked by tests. If those
-trees become available, compare `src/indicators/*`,
-`src/signalEngine/cvdDivergenceAbsorptionStrategy.ts`, `src/risk/riskManager.ts`,
-and `src/config/schema.ts` against them (tests > code > config > docs).
+To regenerate the oracle fixture from Python:
+`PRODACTION_PATH=../CVDBot-prodaction npm run parity:oracle`.

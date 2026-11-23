@@ -1,83 +1,62 @@
 import { loadConfig } from "./config/load.js";
+import { isLiveAllowed } from "./config/schema.js";
 import { createLogger } from "./logging/logger.js";
 import { AppDatabase } from "./db/database.js";
-import { BinanceRestClient } from "./exchange/binanceRest.js";
-import { MarketDataService } from "./marketData/marketDataService.js";
-import { CvdDivergenceAbsorptionStrategy } from "./signalEngine/cvdDivergenceAbsorptionStrategy.js";
-import { RiskManager } from "./risk/riskManager.js";
-import { PositionTracker } from "./positions/positionTracker.js";
-import { createExecutor } from "./executor/paperExecutor.js";
-import { TradeJournal } from "./journal/tradeJournal.js";
+import { BinanceKlineStream, BinanceSpotRest } from "./exchange/binanceSpot.js";
 import { createNotifier } from "./telegram/telegramNotifier.js";
-import { Reconciler } from "./reconciliation/reconciler.js";
-import { TradingEngine } from "./app/TradingEngine.js";
-import { isLiveAllowed } from "./config/schema.js";
+import { PaperRuntime } from "./runtime/paperRuntime.js";
+import { STRATEGY_SEMANTICS, STRATEGY_VERSION } from "./strategy/engine082f.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config.logLevel);
 
   if (config.tradingMode === "LIVE" || config.liveTradingEnabled || isLiveAllowed(config)) {
-    logger.error(
-      { tradingMode: config.tradingMode, liveTradingEnabled: config.liveTradingEnabled },
-      "LIVE trading is disabled in this build",
-    );
-    throw new Error("LIVE execution is not enabled. Use TRADING_MODE=PAPER.");
+    throw new Error("LIVE execution is not implemented in this build. Use TRADING_MODE=PAPER.");
   }
 
-  const db = new AppDatabase(config.databasePath, logger);
-  const rest = new BinanceRestClient(config.binanceRestUrl);
-  const marketData = new MarketDataService(config, rest, logger);
-  const strategy = new CvdDivergenceAbsorptionStrategy(config.strategy, {
-    now: () => Date.now(),
-    onLog: (level, msg, extra) => logger[level](extra, msg),
-  });
-  const risk = new RiskManager(config);
-  const positions = new PositionTracker(db, logger);
-  const executor = createExecutor(config, positions, logger, () => Date.now());
-  const journal = new TradeJournal(db);
-  const notifier = createNotifier(config, logger);
-  const reconciler = new Reconciler(db, positions, logger);
-
-  let engine: TradingEngine | undefined;
-
-  const history = await marketData.load(async (candle) => {
-    if (engine) {
-      await engine.onClosedCandle(candle);
-    }
-  });
-
-  engine = new TradingEngine(
-    config,
-    logger,
-    strategy,
-    risk,
-    positions,
-    executor,
-    journal,
-    notifier,
-    reconciler,
-    marketData,
-    marketData.getFilters(),
+  logger.info(
+    {
+      strategy: STRATEGY_VERSION,
+      semantics: STRATEGY_SEMANTICS,
+      pool: config.poolVersion,
+      symbols: Object.keys(config.symbolRr).length,
+      riskPercent: config.riskPercent,
+      feeBps: config.feeBps,
+      slippageBps: config.slippageBps,
+      maxActivePositions: config.maxActivePositions,
+      maxPositionLeverage: config.maxPositionLeverage,
+      maxTotalLeverage: config.maxTotalLeverage,
+      checkExitsAfterImmediateFill: config.checkExitsAfterImmediateFill,
+      mode: "PAPER",
+    },
+    "startup_identity",
   );
 
-  marketData.onResync = async (h) => {
-    await engine?.resyncFromHistory(h);
-  };
+  const db = new AppDatabase(config.databasePath, logger);
+  const runtime = new PaperRuntime(
+    config,
+    logger,
+    db,
+    new BinanceSpotRest(config.restUrl, config.httpTimeoutMs),
+    new BinanceKlineStream(config.wsUrl, config.wsInboundTimeoutMs, logger),
+    createNotifier(config.telegramBotToken, config.telegramChatId, logger),
+  );
 
-  await engine.bootstrap(history);
-  engine.reconcile();
-  marketData.connect();
-
+  let stopping = false;
   const shutdown = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     logger.info({ signal }, "shutdown");
-    await marketData.stop();
-    engine?.reconcile();
+    await runtime.stop();
     db.close();
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("unhandledRejection", (err) => logger.error({ err }, "unhandled_rejection"));
+
+  await runtime.start();
 }
 
 main().catch((err: unknown) => {

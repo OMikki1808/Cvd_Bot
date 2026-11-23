@@ -2,44 +2,54 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppLogger } from "../logging/logger.js";
+import type { NetTrade } from "../portfolio/paperPortfolio.js";
 
+export interface AccountRow {
+  startingEquity: number;
+  equity: number;
+  peakEquity: number;
+  maxDrawdown: number;
+}
+
+/**
+ * SQLite persistence: engine state per symbol, shared paper account, idempotent
+ * close ledger (UNIQUE setup_id + exit_time) and an event journal.
+ */
 export class AppDatabase {
   private readonly db: DatabaseSync;
 
-  constructor(
-    path: string,
-    private readonly logger: AppLogger,
-  ) {
+  constructor(path: string, logger: AppLogger) {
     if (path !== ":memory:") {
       mkdirSync(dirname(path), { recursive: true });
     }
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
-    this.db.exec("PRAGMA foreign_keys = ON;");
-    this.migrate();
-  }
-
-  private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS trades (
-        id TEXT PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS engine_state (
+        symbol TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS closed_trades (
+        setup_id TEXT NOT NULL,
+        exit_time INTEGER NOT NULL,
         symbol TEXT NOT NULL,
         side TEXT NOT NULL,
-        quantity TEXT NOT NULL,
-        entry TEXT NOT NULL,
-        stop_loss TEXT NOT NULL,
-        take_profit TEXT NOT NULL,
-        rr TEXT NOT NULL,
-        exit TEXT,
-        pnl TEXT,
-        reason TEXT,
-        opened_at INTEGER NOT NULL,
-        closed_at INTEGER,
-        signal_candle_open_time INTEGER NOT NULL,
-        cvd TEXT,
-        divergence_kind TEXT,
-        absorption_kind TEXT,
-        raw_json TEXT NOT NULL
+        entry_time INTEGER NOT NULL,
+        entry REAL NOT NULL,
+        stop REAL NOT NULL,
+        take_profit REAL NOT NULL,
+        exit_price REAL NOT NULL,
+        qty REAL NOT NULL,
+        outcome TEXT NOT NULL,
+        fill_reason TEXT NOT NULL,
+        pnl REAL NOT NULL,
+        fees REAL NOT NULL,
+        slippage REAL NOT NULL,
+        net_pnl REAL NOT NULL,
+        equity_after REAL NOT NULL,
+        PRIMARY KEY (setup_id, exit_time)
       );
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,65 +59,90 @@ export class AppDatabase {
         payload TEXT NOT NULL
       );
     `);
-    this.logger.info({ path: "sqlite" }, "database_initialized");
+    logger.info({ path }, "database_initialized");
   }
 
-  insertTrade(row: {
-    id: string;
-    symbol: string;
-    side: string;
-    quantity: string;
-    entry: string;
-    stopLoss: string;
-    takeProfit: string;
-    rr: string;
-    openedAt: number;
-    signalCandleOpenTime: number;
-    cvd: string;
-    divergenceKind: string;
-    absorptionKind: string;
-    rawJson: string;
-  }): void {
+  getMeta(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  loadAccount(): AccountRow | null {
+    const raw = this.getMeta("paper_account_v1");
+    return raw ? (JSON.parse(raw) as AccountRow) : null;
+  }
+
+  saveAccount(a: AccountRow): void {
+    this.setMeta("paper_account_v1", JSON.stringify(a));
+  }
+
+  loadEngineState(symbol: string): unknown | null {
+    const row = this.db.prepare("SELECT state_json FROM engine_state WHERE symbol = ?").get(symbol) as
+      | { state_json: string }
+      | undefined;
+    return row ? JSON.parse(row.state_json) : null;
+  }
+
+  saveEngineState(symbol: string, state: unknown): void {
     this.db
       .prepare(
-        `INSERT INTO trades (
-          id, symbol, side, quantity, entry, stop_loss, take_profit, rr,
-          opened_at, signal_candle_open_time, cvd, divergence_kind, absorption_kind, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        "INSERT INTO engine_state (symbol, state_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(symbol) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
       )
-      .run(
-        row.id,
-        row.symbol,
-        row.side,
-        row.quantity,
-        row.entry,
-        row.stopLoss,
-        row.takeProfit,
-        row.rr,
-        row.openedAt,
-        row.signalCandleOpenTime,
-        row.cvd,
-        row.divergenceKind,
-        row.absorptionKind,
-        row.rawJson,
-      );
+      .run(symbol, JSON.stringify(state), Date.now());
   }
 
-  closeTrade(id: string, exit: string, pnl: string, reason: string, closedAt: number): void {
-    this.db
-      .prepare(`UPDATE trades SET exit = ?, pnl = ?, reason = ?, closed_at = ? WHERE id = ?`)
-      .run(exit, pnl, reason, closedAt, id);
+  /**
+   * Records a close and the resulting account in one transaction.
+   * Returns false if this close was already recorded (replayed bar).
+   */
+  recordClose(t: NetTrade, account: AccountRow): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const res = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO closed_trades (setup_id, exit_time, symbol, side, entry_time, entry, stop, take_profit,
+            exit_price, qty, outcome, fill_reason, pnl, fees, slippage, net_pnl, equity_after)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          t.setupId,
+          t.exitTime,
+          t.symbol,
+          t.side,
+          t.entryTime,
+          t.entry,
+          t.stop,
+          t.takeProfit,
+          t.exitPrice,
+          t.qty,
+          t.outcome,
+          t.fillReason,
+          t.pnl,
+          t.fees,
+          t.slippage,
+          t.netPnl,
+          t.portfolioEquityAfter,
+        );
+      const applied = Number(res.changes) > 0;
+      if (applied) {
+        this.saveAccount(account);
+      }
+      this.db.exec("COMMIT");
+      return applied;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   insertEvent(kind: string, symbol: string | null, payload: unknown): void {
     this.db
-      .prepare(`INSERT INTO events (ts, kind, symbol, payload) VALUES (?, ?, ?, ?)`)
+      .prepare("INSERT INTO events (ts, kind, symbol, payload) VALUES (?, ?, ?, ?)")
       .run(Date.now(), kind, symbol, JSON.stringify(payload));
-  }
-
-  listOpenTradeIds(): string[] {
-    const rows = this.db.prepare(`SELECT id FROM trades WHERE closed_at IS NULL`).all() as { id: string }[];
-    return rows.map((r) => r.id);
   }
 
   close(): void {

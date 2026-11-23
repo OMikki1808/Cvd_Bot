@@ -1,0 +1,7 @@
+[
+  {"name": "clean_rr2", "seed": 1, "bars": 12000, "gapProb": 0, "vol": 0.006, "rr": 2},
+  {"name": "clean_rr4", "seed": 7, "bars": 12000, "gapProb": 0, "vol": 0.004, "rr": 4},
+  {"name": "clean_rr1", "seed": 42, "bars": 12000, "gapProb": 0, "vol": 0.01, "rr": 1},
+  {"name": "gaps_rr3", "seed": 99, "bars": 12000, "gapProb": 0.002, "vol": 0.006, "rr": 3},
+  {"name": "gaps_heavy_rr2", "seed": 2024, "bars": 8000, "gapProb": 0.02, "vol": 0.008, "rr": 2}
+]
