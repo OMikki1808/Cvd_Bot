@@ -6,7 +6,7 @@ import { loadScenarios } from "./parity/runParity.js";
 import { generate } from "./parity/synthetic.js";
 
 describe("backtester", () => {
-  const sc = loadScenarios();
+  const sc = loadScenarios().filter((s) => !s.mode || s.mode === "limit1bar");
   const bars = new Map(sc.map((s) => [s.name.toUpperCase(), generate(s.seed, s.bars, s.gapProb, s.vol)]));
   const symbolRr = Object.fromEntries(sc.map((s) => [s.name.toUpperCase(), s.rr]));
 
@@ -31,7 +31,7 @@ describe("backtester", () => {
   it("costs only ever reduce PnL and are accounted per trade", () => {
     const base = { bars, symbolRr, startingEquity: 10_000, riskPercent: 1, limits: NO_LIMITS, isolated: false, checkExitsAfterImmediateFill: false };
     const gross = runBacktest({ ...base, costs: NO_COSTS });
-    const net = runBacktest({ ...base, costs: { feeBps: 10, slippageBps: 5 } });
+    const net = runBacktest({ ...base, costs: { takerFeeBps: 10, makerFeeBps: 10, slippageBps: 5 } });
     expect(net.feesPaid).toBeGreaterThan(0);
     expect(net.finalEquity).toBeLessThan(gross.finalEquity);
     for (const t of net.trades) expect(t.netPnl).toBeCloseTo(t.pnl - t.fees - t.slippage, 9);

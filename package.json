@@ -17,7 +17,8 @@
     "backtest": "tsx src/backtest/cli.ts",
     "fetch-data": "tsx src/backtest/fetchKlines.ts",
     "parity": "tsx tests/parity/runParity.ts",
-    "parity:oracle": "python3 parity/run_oracle.py > tests/fixtures/parity082f.json"
+    "parity:oracle": "python3 parity/run_oracle.py > tests/fixtures/parity082f.json",
+    "sweep": "tsx src/backtest/sweep.ts"
   },
   "dependencies": {
     "decimal.js": "^10.5.0",

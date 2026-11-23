@@ -1,4 +1,4 @@
-import type { Bar15m } from "../strategy/engine082f.js";
+import type { Bar15m, EntryMode } from "../strategy/engine082f.js";
 import { PaperPortfolio, type CostModel, type NetTrade, type RiskLimits } from "../portfolio/paperPortfolio.js";
 
 export interface BacktestInput {
@@ -10,6 +10,10 @@ export interface BacktestInput {
   limits: RiskLimits;
   isolated: boolean;
   checkExitsAfterImmediateFill: boolean;
+  entryMode?: EntryMode;
+  trendFilterHours?: number;
+  minStopPct?: number;
+  immediateFillAtMarket?: boolean;
 }
 
 export interface SymbolStats {
@@ -25,6 +29,8 @@ export interface SymbolStats {
   maxDrawdown: number;
   untrustedHours: number;
   rejected: number;
+  filtered: number;
+  avgR: number;
 }
 
 export interface BacktestResult {
@@ -39,6 +45,8 @@ export interface BacktestResult {
   monthly: Array<{ month: string; netPnl: number; trades: number }>;
   maxConcurrentPositions: number;
   maxOpenNotionalX: number;
+  avgNetR: number;
+  avgGrossR: number;
 }
 
 /** Replays all symbols in global time order (ties broken by symbol order), like the live stream. */
@@ -51,6 +59,10 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     limits: input.limits,
     isolated: input.isolated,
     checkExitsAfterImmediateFill: input.checkExitsAfterImmediateFill,
+    entryMode: input.entryMode ?? "limit1bar",
+    immediateFillAtMarket: input.immediateFillAtMarket ?? false,
+    trendFilterHours: input.trendFilterHours ?? 0,
+    minStopPct: input.minStopPct ?? 0,
   });
   const symbols = pf.symbols.filter((s) => (input.bars.get(s)?.length ?? 0) > 0);
   const cursor = new Map<string, number>(symbols.map((s) => [s, 0]));
@@ -108,6 +120,8 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       maxDrawdown: dd,
       untrustedHours: eng?.funnel.untrustedHours ?? 0,
       rejected: eng?.funnel.entriesRejected ?? 0,
+      filtered: (eng?.funnel.filteredTrend ?? 0) + (eng?.funnel.filteredStop ?? 0),
+      avgR: ts.length ? ts.reduce((a, t) => a + t.netPnl / (Math.abs(t.entry - t.stop) * t.qty), 0) / ts.length : 0,
     };
   });
 
@@ -133,5 +147,12 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     monthly: [...monthlyMap.entries()].sort().map(([month, v]) => ({ month, ...v })),
     maxConcurrentPositions: maxConcurrent,
     maxOpenNotionalX: maxNotionalX,
+    avgNetR: meanR(pf.trades, (t) => t.netPnl),
+    avgGrossR: meanR(pf.trades, (t) => t.pnl),
   };
+}
+
+function meanR(ts: NetTrade[], pick: (t: NetTrade) => number): number {
+  if (ts.length === 0) return 0;
+  return ts.reduce((a, t) => a + pick(t) / (Math.abs(t.entry - t.stop) * t.qty), 0) / ts.length;
 }

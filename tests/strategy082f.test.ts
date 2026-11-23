@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Engine082fLimit1Bar, type EngineEvent } from "../src/strategy/engine082f.js";
+import { Engine082f, Engine082fLimit1Bar, type EngineEvent } from "../src/strategy/engine082f.js";
 import { PivotDetector, resolveExitIntrabar, computeDelta } from "../src/strategy/primitives.js";
 import { resolvePool } from "../src/strategy/productionPool.js";
 import { checkScenario, loadScenarios } from "./parity/runParity.js";
@@ -98,5 +98,62 @@ describe("production pool", () => {
     expect(Object.keys(pool)).toHaveLength(35);
     expect(pool.BTCUSDT).toBe(3);
     expect(Object.values(pool).every((rr) => rr >= 1 && rr <= 4)).toBe(true);
+  });
+});
+
+describe("filters and market mode", () => {
+  const bars = generate(7, 12000, 0, 0.006);
+  const hourlyClose = new Map<number, number>();
+  for (const b of bars) hourlyClose.set(Math.floor(b.openTime / 3_600_000) * 3_600_000, b.close);
+
+  for (const entryMode of ["market", "limit1bar"] as const) {
+    it(`${entryMode}: trend filter only lets trend-aligned setups through (checked independently)`, () => {
+      const N = 168;
+      const opened: Array<{ side: string; time: number }> = [];
+      const filtered: string[] = [];
+      const eng = new Engine082f({
+        symbol: "T",
+        rrTarget: 2,
+        entryMode,
+        trendFilterHours: N,
+        onEvent: (e) => {
+          if (e.type === "LimitSignal" || (e.type === "PositionOpened" && e.position.fillReason === "MARKET")) {
+            opened.push({ side: e.type === "LimitSignal" ? e.side : e.position.side, time: e.time });
+          }
+          if (e.type === "SetupFiltered") filtered.push(e.reason);
+        },
+      });
+      bars.forEach((b) => eng.on15mBar(b));
+      expect(opened.length).toBeGreaterThan(5);
+      expect(filtered.filter((r) => r === "COUNTER_TREND").length).toBeGreaterThan(5);
+      for (const o of opened) {
+        const now = hourlyClose.get(o.time) as number;
+        const ref = hourlyClose.get(o.time - N * 3_600_000) as number;
+        expect(o.side === "long" ? now > ref : now < ref).toBe(true);
+      }
+    });
+  }
+
+  it("min stop filter", () => {
+    const eng = new Engine082f({ symbol: "T", rrTarget: 2, entryMode: "market", minStopPct: 0.8 });
+    bars.forEach((b) => eng.on15mBar(b));
+    eng.flush();
+    expect(eng.trades.length).toBeGreaterThan(0);
+    for (const t of eng.trades) expect((Math.abs(t.entry - t.stop) / t.entry) * 100).toBeGreaterThanOrEqual(0.8);
+    expect(eng.funnel.filteredStop).toBeGreaterThan(0);
+  });
+
+  it("market mode dump/load mid-stream reproduces an uninterrupted run", () => {
+    const opts = { symbol: "T", rrTarget: 3, entryMode: "market" as const, trendFilterHours: 72 };
+    const ref = new Engine082f(opts);
+    bars.forEach((b) => ref.on15mBar(b));
+    ref.flush();
+    const a = new Engine082f(opts);
+    bars.slice(0, 5003).forEach((b) => a.on15mBar(b));
+    const b2 = new Engine082f(opts);
+    b2.loadState(JSON.parse(JSON.stringify(a.dumpState())));
+    bars.slice(5003).forEach((b) => b2.on15mBar(b));
+    b2.flush();
+    expect(a.trades.concat(b2.trades)).toEqual(ref.trades);
   });
 });

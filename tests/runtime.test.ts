@@ -23,7 +23,8 @@ const config = parseConfig({
   SYMBOLS: SYMBOLS.join(","),
   WARMUP_DAYS: String(WARMUP_DAYS),
   DATABASE_PATH: ":memory:",
-  FEE_BPS: "10",
+  TAKER_FEE_BPS: "10",
+  MAKER_FEE_BPS: "10",
   SLIPPAGE_BPS: "5",
   MAX_POSITION_LEVERAGE: "5",
 });
@@ -59,8 +60,10 @@ function reference(until: number) {
     symbolRr: config.symbolRr,
     startingEquity: config.startingEquity,
     riskPercent: config.riskPercent,
-    costs: { feeBps: 10, slippageBps: 5 },
+    costs: { takerFeeBps: 10, makerFeeBps: 10, slippageBps: 5 },
     limits: { maxActivePositions: 15, maxPositionLeverage: 5, maxTotalLeverage: 0, leverageMode: "cap" },
+    checkExitsAfterImmediateFill: true,
+    immediateFillAtMarket: true,
   });
   for (let t = data.DOGEUSDT?.[0]?.openTime ?? 0; t < until; t += MIN15) {
     for (const s of SYMBOLS) {

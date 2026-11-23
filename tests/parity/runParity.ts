@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { Engine082fLimit1Bar } from "../../src/strategy/engine082f.js";
+import { Engine082f } from "../../src/strategy/engine082f.js";
 import { generate } from "./synthetic.js";
 
 interface Scenario {
@@ -10,6 +10,7 @@ interface Scenario {
   gapProb: number;
   vol: number;
   rr: number;
+  mode?: "market" | "limit1bar";
   expected: {
     finalEquity: number;
     maxDrawdown: number;
@@ -25,7 +26,7 @@ export function loadScenarios(): Scenario[] {
 
 /** Returns a list of human-readable mismatches (empty = exact parity). */
 export function checkScenario(sc: Scenario): string[] {
-  const eng = new Engine082fLimit1Bar({ symbol: "TESTUSDT", rrTarget: sc.rr });
+  const eng = new Engine082f({ symbol: "TESTUSDT", rrTarget: sc.rr, entryMode: sc.mode ?? "limit1bar" });
   for (const b of generate(sc.seed, sc.bars, sc.gapProb, sc.vol)) {
     eng.on15mBar(b);
   }

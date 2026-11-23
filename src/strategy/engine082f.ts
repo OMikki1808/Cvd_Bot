@@ -37,6 +37,7 @@ import {
 } from "./primitives.js";
 
 export const STRATEGY_VERSION = "V082F_ENGINE_V2_LIMIT_1BAR";
+export const STRATEGY_VERSION_MARKET = "V082F_ENGINE_V2";
 export const STRATEGY_NAME = "cvd_divergence_082f_engine_v2_limit_1bar";
 export const STRATEGY_SEMANTICS = "CVD_DIVERGENCE_082F_ENGINE_V2_BINANCE_TRUE_CVD_V1";
 
@@ -69,7 +70,15 @@ export interface Position {
   confirmationTime: number;
 }
 
-export type FillReason = "IMMEDIATE_FILL" | "FILLED_NEXT_HOUR";
+export type FillReason = "IMMEDIATE_FILL" | "FILLED_NEXT_HOUR" | "MARKET";
+
+/**
+ * limit1bar = production V082F_ENGINE_V2_LIMIT_1BAR (confirm on the bar after the pivot, limit entry).
+ * market    = V082F_ENGINE_V2 (cvdbot/strategy/s082f/engine.py): the bar where the divergence is
+ *             discovered is the "divergence candle"; confirm on the next bar, enter at its close,
+ *             stop at the divergence candle low/high.
+ */
+export type EntryMode = "limit1bar" | "market";
 
 export interface PendingLimitOrder {
   side: Side;
@@ -127,6 +136,7 @@ export type EngineEvent =
     }
   | { type: "LimitCancelled"; symbol: string; side: Side; time: number; setupId: string; entry: number; reason: string }
   | { type: "EntryRejected"; symbol: string; side: Side; time: number; setupId: string; reason: string }
+  | { type: "SetupFiltered"; symbol: string; side: Side; time: number; reason: string }
   | { type: "PositionOpened"; symbol: string; time: number; position: Position; riskCash: number; equityBefore: number }
   | { type: "PositionClosed"; symbol: string; time: number; trade: ClosedTrade };
 
@@ -150,8 +160,32 @@ export interface EngineOptions {
   startTradeIndex?: number;
   /** false = byte-for-byte Python behaviour; true = also check SL/TP on the bar after an immediate fill. */
   checkExitsAfterImmediateFill?: boolean;
+  /**
+   * limit1bar only. Python fills an immediately marketable limit at the LIMIT price even though
+   * the market is already better (an exchange would fill at the market). true = fill at the
+   * current close instead (realistic). false = Python parity.
+   */
+  immediateFillAtMarket?: boolean;
+  /** Default "limit1bar" (production). */
+  entryMode?: EntryMode;
+  /**
+   * Trend filter (not in the Python engines; 0 = off). Long only if the 1H close is above
+   * the close `trendFilterHours` hourly bars ago, short only if below.
+   */
+  trendFilterHours?: number;
+  /** Skip setups whose stop is closer than this % of entry (0 = off). Fees eat tight stops. */
+  minStopPct?: number;
   entryGuard?: EntryGuard;
   onEvent?: (event: EngineEvent) => void;
+}
+
+interface MarketPending {
+  side: Side;
+  confirmIdx: number;
+  divergenceTime: number;
+  divOpen: number;
+  divHigh: number;
+  divLow: number;
 }
 
 interface HourBar {
@@ -186,9 +220,13 @@ export interface EngineState {
   hourTrusted: boolean;
   last15mMs: number | null;
   funnel: Record<string, number>;
+  entryMode?: EntryMode;
+  pendingLong?: MarketPending | null;
+  pendingShort?: MarketPending | null;
+  closesHist?: number[];
 }
 
-export class Engine082fLimit1Bar {
+export class Engine082f {
   readonly symbol: string;
   readonly rrTarget: number;
   readonly pivotLeft: number;
@@ -197,6 +235,10 @@ export class Engine082fLimit1Bar {
   readonly initialCapital: number;
   readonly startTradeIndex: number;
   readonly checkExitsAfterImmediateFill: boolean;
+  readonly entryMode: EntryMode;
+  readonly immediateFillAtMarket: boolean;
+  readonly trendFilterHours: number;
+  readonly minStopPct: number;
   entryGuard: EntryGuard | undefined;
   onEvent: ((event: EngineEvent) => void) | undefined;
 
@@ -223,6 +265,8 @@ export class Engine082fLimit1Bar {
     limitCancelled: 0,
     entriesRejected: 0,
     untrustedHours: 0,
+    filteredTrend: 0,
+    filteredStop: 0,
   };
 
   private readonly cvdAcc = new CvdAccumulator();
@@ -240,6 +284,9 @@ export class Engine082fLimit1Bar {
   private hourTrusted = true;
   private last15mMs: number | null = null;
   private suppressNewSetups = false;
+  private pendingLong: MarketPending | null = null;
+  private pendingShort: MarketPending | null = null;
+  private closesHist: number[] = [];
 
   constructor(opts: EngineOptions) {
     this.symbol = opts.symbol;
@@ -250,6 +297,10 @@ export class Engine082fLimit1Bar {
     this.initialCapital = opts.initialCapital ?? 10_000;
     this.startTradeIndex = opts.startTradeIndex ?? 2;
     this.checkExitsAfterImmediateFill = opts.checkExitsAfterImmediateFill ?? false;
+    this.entryMode = opts.entryMode ?? "limit1bar";
+    this.immediateFillAtMarket = opts.immediateFillAtMarket ?? false;
+    this.trendFilterHours = opts.trendFilterHours ?? 0;
+    this.minStopPct = opts.minStopPct ?? 0;
     this.entryGuard = opts.entryGuard;
     this.onEvent = opts.onEvent;
     this.equity = this.initialCapital;
@@ -389,6 +440,10 @@ export class Engine082fLimit1Bar {
     }
     this.lastTime = time;
     this.lastClose = close;
+    if (this.trendFilterHours > 0) {
+      this.closesHist.push(close);
+      if (this.closesHist.length > this.trendFilterHours + 1) this.closesHist.shift();
+    }
 
     let bear: DivergenceMeta | null = null;
     let bull: DivergenceMeta | null = null;
@@ -441,6 +496,11 @@ export class Engine082fLimit1Bar {
       }
     }
 
+    if (this.entryMode === "market") {
+      this.marketStep(i, time, open, high, low, close, bull, bear);
+      return;
+    }
+
     // 3) Expire the pending limit exactly at its expiry candle close.
     if (this.pendingLimit !== null && i === this.pendingLimit.expiryIdx && this.position === null) {
       this.cancelPending(this.pendingLimit, time, "LIMIT_EXPIRED_NOT_FILLED");
@@ -453,6 +513,107 @@ export class Engine082fLimit1Bar {
     if (bear) {
       this.processDivergence(i, "short", bear, time);
     }
+  }
+
+  /** V082F_ENGINE_V2 steps 3-4: register pending setups, confirm exactly on the next bar. */
+  private marketStep(
+    i: number,
+    time: number,
+    open: number,
+    high: number,
+    low: number,
+    close: number,
+    bull: DivergenceMeta | null,
+    bear: DivergenceMeta | null,
+  ): void {
+    if (bull) {
+      this.pendingLong = { side: "long", confirmIdx: i + 1, divergenceTime: time, divOpen: open, divHigh: high, divLow: low };
+    }
+    if (bear) {
+      this.pendingShort = { side: "short", confirmIdx: i + 1, divergenceTime: time, divOpen: open, divHigh: high, divLow: low };
+    }
+    for (const pending of [this.pendingLong, this.pendingShort]) {
+      if (pending === null || i !== pending.confirmIdx) continue;
+      const side = pending.side;
+      const ok = side === "long" ? close > pending.divOpen : close < pending.divOpen;
+      const key = `confirm${side === "long" ? "Long" : "Short"}${ok ? "Pass" : "Fail"}`;
+      this.funnel[key] = (this.funnel[key] ?? 0) + 1;
+      this.emit({
+        type: ok ? "ConfirmationPassed" : "ConfirmationFailed",
+        symbol: this.symbol,
+        side,
+        time,
+        divergenceTime: pending.divergenceTime,
+        confirmationTime: time,
+      });
+      if (ok && this.position === null) {
+        if (this.suppressNewSetups) {
+          this.emit({ type: "RecoverySuppressedNewSetup", symbol: this.symbol, side, time, divergenceTime: pending.divergenceTime });
+        } else {
+          this.openMarket(pending, close, time);
+        }
+      }
+      if (side === "long") this.pendingLong = null;
+      else this.pendingShort = null;
+    }
+  }
+
+  private openMarket(pending: MarketPending, entry: number, time: number): void {
+    const side = pending.side;
+    const stop = side === "long" ? pending.divLow : pending.divHigh;
+    const rpu = side === "long" ? entry - stop : stop - entry;
+    if (rpu <= 1e-12) return;
+    if (this.filtered(side, entry, stop, time)) return;
+    const riskCash = this.equity * (this.riskPercent / 100);
+    let qty = riskCash / rpu;
+    if (qty <= 0) return;
+    const takeProfit = side === "long" ? entry + rpu * this.rrTarget : entry - rpu * this.rrTarget;
+    const setupId = this.setupId(side, pending.divergenceTime, time);
+    if (this.entryGuard) {
+      const verdict = this.entryGuard({ symbol: this.symbol, side, entry, stop, qty, equity: this.equity });
+      if ("reject" in verdict) {
+        this.funnel.entriesRejected = (this.funnel.entriesRejected ?? 0) + 1;
+        this.emit({ type: "EntryRejected", symbol: this.symbol, side, time, setupId, reason: verdict.reject });
+        return;
+      }
+      qty = verdict.qty;
+    }
+    this.position = {
+      setupId,
+      side,
+      entry,
+      stop,
+      takeProfit,
+      qty,
+      entryTime: time,
+      fillReason: "MARKET",
+      divergenceTime: pending.divergenceTime,
+      confirmationTime: time,
+    };
+    this.positionOpenIdx = this.index - 1;
+    const key = side === "long" ? "entriesLong" : "entriesShort";
+    this.funnel[key] = (this.funnel[key] ?? 0) + 1;
+    this.emit({ type: "PositionOpened", symbol: this.symbol, time, position: { ...this.position }, riskCash, equityBefore: this.equity });
+  }
+
+  /** Optional filters (trend, min stop). Returns true if the setup must be skipped. */
+  private filtered(side: Side, entry: number, stop: number, time: number): boolean {
+    let reason: string | null = null;
+    if (this.minStopPct > 0 && (Math.abs(entry - stop) / entry) * 100 < this.minStopPct) {
+      reason = "MIN_STOP_PCT";
+      this.funnel.filteredStop = (this.funnel.filteredStop ?? 0) + 1;
+    } else if (this.trendFilterHours > 0) {
+      const ref = this.closesHist.length > this.trendFilterHours ? this.closesHist[0] : undefined;
+      const now = this.lastClose;
+      const ok = ref !== undefined && (side === "long" ? now > ref : now < ref);
+      if (!ok) {
+        reason = ref === undefined ? "TREND_WARMUP" : "COUNTER_TREND";
+        this.funnel.filteredTrend = (this.funnel.filteredTrend ?? 0) + 1;
+      }
+    }
+    if (reason === null) return false;
+    this.emit({ type: "SetupFiltered", symbol: this.symbol, side, time, reason });
+    return true;
   }
 
   private processDivergence(i: number, side: Side, meta: DivergenceMeta, time: number): void {
@@ -511,6 +672,9 @@ export class Engine082fLimit1Bar {
     if (this.position !== null || this.pendingLimit !== null) {
       return;
     }
+    if (this.filtered(side, limitPrice, meta.currPriceExtreme, now)) {
+      return;
+    }
     const order: PendingLimitOrder = {
       side,
       divergenceTime: meta.currPivotTime,
@@ -560,7 +724,8 @@ export class Engine082fLimit1Bar {
     if (this.pendingLimit === null) {
       return;
     }
-    const entry = order.limitPrice;
+    const entry =
+      reason === "IMMEDIATE_FILL" && this.immediateFillAtMarket ? this.lastClose : order.limitPrice;
     const stop = order.stop;
     const rpu = order.side === "long" ? entry - stop : stop - entry;
     if (rpu <= 1e-12) {
@@ -701,7 +866,7 @@ export class Engine082fLimit1Bar {
   }
 
   private setupId(side: Side, divergenceTime: number, t: number): string {
-    return `082f-limit1bar:${this.symbol}:${side}:${new Date(divergenceTime).toISOString()}:${new Date(t).toISOString()}`;
+    return `082f-${this.entryMode}:${this.symbol}:${side}:${new Date(divergenceTime).toISOString()}:${new Date(t).toISOString()}`;
   }
 
   private emit(event: EngineEvent): void {
@@ -734,12 +899,16 @@ export class Engine082fLimit1Bar {
       hourTrusted: this.hourTrusted,
       last15mMs: this.last15mMs,
       funnel: { ...this.funnel },
+      entryMode: this.entryMode,
+      pendingLong: this.pendingLong ? { ...this.pendingLong } : null,
+      pendingShort: this.pendingShort ? { ...this.pendingShort } : null,
+      closesHist: [...this.closesHist],
     };
   }
 
   loadState(s: EngineState): void {
-    if (s.strategyVersion !== STRATEGY_VERSION || s.symbol !== this.symbol) {
-      throw new Error(`state mismatch: ${s.strategyVersion}/${s.symbol} vs ${STRATEGY_VERSION}/${this.symbol}`);
+    if (s.strategyVersion !== STRATEGY_VERSION || s.symbol !== this.symbol || (s.entryMode ?? "limit1bar") !== this.entryMode) {
+      throw new Error(`state mismatch: ${s.strategyVersion}/${s.symbol}/${s.entryMode} vs ${this.symbol}/${this.entryMode}`);
     }
     this.equity = s.equity;
     this.peakEquity = s.peakEquity;
@@ -762,5 +931,12 @@ export class Engine082fLimit1Bar {
     this.hourTrusted = s.hourTrusted;
     this.last15mMs = s.last15mMs;
     this.funnel = { ...s.funnel };
+    this.pendingLong = s.pendingLong ? { ...s.pendingLong } : null;
+    this.pendingShort = s.pendingShort ? { ...s.pendingShort } : null;
+    this.closesHist = [...(s.closesHist ?? [])];
   }
 }
+
+/** Backwards-compatible name. */
+export const Engine082fLimit1Bar = Engine082f;
+export type Engine082fLimit1Bar = Engine082f;

@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, os.environ.get("PRODACTION_PATH", "../CVDBot-prodaction"))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from cvdbot.strategy.v082f_engine_v2.engine import RuntimeStrategy082FEngineV2  # noqa: E402
 from cvdbot.strategy.v082f_engine_v2_limit_1bar.engine import (  # noqa: E402
     RuntimeStrategy082FEngineV2Limit1Bar,
 )
@@ -24,7 +25,8 @@ def ms(iso: str) -> int:
 
 
 def run(sc: dict) -> dict:
-    eng = RuntimeStrategy082FEngineV2Limit1Bar(symbol="TESTUSDT", rr_target=float(sc["rr"]))
+    cls = RuntimeStrategy082FEngineV2 if sc.get("mode") == "market" else RuntimeStrategy082FEngineV2Limit1Bar
+    eng = cls(symbol="TESTUSDT", rr_target=float(sc["rr"]))
     for b in generate(sc["seed"], sc["bars"], sc["gapProb"], sc["vol"]):
         eng.on_15m_bar(
             time=datetime.fromtimestamp(b["openTime"] / 1000.0, tz=timezone.utc),
@@ -51,22 +53,25 @@ def run(sc: dict) -> dict:
         for t in eng.trades
     ]
     f = eng.funnel
-    funnel = {
-        "divergenceBullish": f["divergence_bullish"],
-        "divergenceBearish": f["divergence_bearish"],
-        "confirmLongPass": f["confirm_long_pass"],
-        "confirmShortPass": f["confirm_short_pass"],
-        "confirmLongFail": f["confirm_long_fail"],
-        "confirmShortFail": f["confirm_short_fail"],
-        "limitOrdersPlaced": f["limit_orders_placed"],
-        "immediateFills": f["immediate_fills"],
-        "nextHourFills": f["next_hour_fills"],
-        "limitCancelled": f["limit_cancelled"],
-        "reverseCloses": f["reverse_closes"],
+    keys = {
+        "divergenceBullish": "divergence_bullish",
+        "divergenceBearish": "divergence_bearish",
+        "confirmLongPass": "confirm_long_pass",
+        "confirmShortPass": "confirm_short_pass",
+        "confirmLongFail": "confirm_long_fail",
+        "confirmShortFail": "confirm_short_fail",
+        "limitOrdersPlaced": "limit_orders_placed",
+        "immediateFills": "immediate_fills",
+        "nextHourFills": "next_hour_fills",
+        "limitCancelled": "limit_cancelled",
+        "reverseCloses": "reverse_closes",
+        "entriesLong": "entries_long",
+        "entriesShort": "entries_short",
     }
+    funnel = {k: f[v] for k, v in keys.items() if v in f}
     return {**sc, "expected": {"finalEquity": eng.equity, "maxDrawdown": eng.max_drawdown, "funnel": funnel, "trades": trades}}
 
 
 if __name__ == "__main__":
     scenarios = json.loads((Path(__file__).parent / "scenarios.json").read_text())
-    print(json.dumps({"oracle": "CVDBot-prodaction cvdbot/strategy/v082f_engine_v2_limit_1bar/engine.py @ fc9145d", "scenarios": [run(s) for s in scenarios]}))
+    print(json.dumps({"oracle": "CVDBot-prodaction cvdbot/strategy/v082f_engine_v2{,_limit_1bar}/engine.py @ fc9145d", "scenarios": [run(s) for s in scenarios]}))

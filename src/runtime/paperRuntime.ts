@@ -44,7 +44,7 @@ export class PaperRuntime {
       symbolRr: config.symbolRr,
       startingEquity: config.startingEquity,
       riskPercent: config.riskPercent,
-      costs: { feeBps: config.feeBps, slippageBps: config.slippageBps },
+      costs: { takerFeeBps: config.takerFeeBps, makerFeeBps: config.makerFeeBps, slippageBps: config.slippageBps },
       limits: {
         maxActivePositions: config.maxActivePositions,
         maxPositionLeverage: config.maxPositionLeverage,
@@ -52,6 +52,10 @@ export class PaperRuntime {
         leverageMode: config.leverageMode,
       },
       checkExitsAfterImmediateFill: config.checkExitsAfterImmediateFill,
+      immediateFillAtMarket: config.immediateFillAtMarket,
+      entryMode: config.entryMode,
+      trendFilterHours: config.trendFilterHours,
+      minStopPct: config.minStopPct,
       closeLedger: (t) =>
         this.db.recordClose(t, {
           startingEquity: this.config.startingEquity,

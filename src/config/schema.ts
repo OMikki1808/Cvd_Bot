@@ -17,18 +17,26 @@ export const envSchema = z.object({
   BINANCE_SPOT_WS_URL: z.string().url().default("wss://stream.binance.com:9443"),
   WS_INBOUND_TIMEOUT_SEC: z.coerce.number().positive().default(90),
   HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
-  WARMUP_DAYS: z.coerce.number().int().min(1).max(30).default(7),
+  WARMUP_DAYS: z.coerce.number().int().min(1).max(60).default(7),
 
   // Strategy (frozen pool from CVDBot-prodaction).
   POOL_VERSION: z.string().default(DEFAULT_POOL_VERSION),
   /** Optional subset of the pool, comma-separated. Empty = whole pool. */
   SYMBOLS: z.string().optional().default(""),
   RISK_PERCENT: z.coerce.number().positive().max(5).default(1),
-  CHECK_EXITS_AFTER_IMMEDIATE_FILL: bool,
+  CHECK_EXITS_AFTER_IMMEDIATE_FILL: z.enum(["true", "false", "1", "0"]).default("true").transform((v) => v === "true" || v === "1"),
+  IMMEDIATE_FILL_AT_MARKET: z.enum(["true", "false", "1", "0"]).default("true").transform((v) => v === "true" || v === "1"),
+  /** limit1bar = production V082F_ENGINE_V2_LIMIT_1BAR, market = V082F_ENGINE_V2. */
+  STRATEGY_MODE: z.enum(["limit1bar", "market"]).default("limit1bar"),
+  /** Uniform RR for all symbols instead of the pool's per-symbol RR (0 = use pool). */
+  RR_ALL: z.coerce.number().min(0).default(0),
+  TREND_FILTER_HOURS: z.coerce.number().int().min(0).default(0),
+  MIN_STOP_PCT: z.coerce.number().min(0).default(0),
 
   // Paper account.
   PAPER_STARTING_EQUITY: z.coerce.number().positive().default(10_000),
-  FEE_BPS: z.coerce.number().min(0).default(10),
+  TAKER_FEE_BPS: z.coerce.number().min(0).default(10),
+  MAKER_FEE_BPS: z.coerce.number().min(0).default(10),
   SLIPPAGE_BPS: z.coerce.number().min(0).default(5),
   MAX_ACTIVE_POSITIONS: z.coerce.number().int().min(0).default(15),
   MAX_POSITION_LEVERAGE: z.coerce.number().min(0).default(5),
@@ -55,8 +63,13 @@ export interface AppConfig {
   symbolRr: Record<string, number>;
   riskPercent: number;
   checkExitsAfterImmediateFill: boolean;
+  immediateFillAtMarket: boolean;
+  entryMode: "limit1bar" | "market";
+  trendFilterHours: number;
+  minStopPct: number;
   startingEquity: number;
-  feeBps: number;
+  takerFeeBps: number;
+  makerFeeBps: number;
   slippageBps: number;
   maxActivePositions: number;
   maxPositionLeverage: number;
@@ -88,7 +101,7 @@ export function parseConfig(env: NodeJS.ProcessEnv): AppConfig {
     if (rr === undefined) {
       throw new ConfigError(`${s} is not in pool ${e.POOL_VERSION}; RR overrides are not allowed for the frozen strategy`);
     }
-    symbolRr[s] = rr;
+    symbolRr[s] = e.RR_ALL > 0 ? e.RR_ALL : rr;
   }
   return {
     tradingMode: e.TRADING_MODE,
@@ -98,13 +111,19 @@ export function parseConfig(env: NodeJS.ProcessEnv): AppConfig {
     wsUrl: e.BINANCE_SPOT_WS_URL.replace(/\/$/, ""),
     wsInboundTimeoutMs: e.WS_INBOUND_TIMEOUT_SEC * 1000,
     httpTimeoutMs: e.HTTP_TIMEOUT_MS,
-    warmupDays: e.WARMUP_DAYS,
+    // The trend filter needs TREND_FILTER_HOURS of history before it lets anything through.
+    warmupDays: Math.max(e.WARMUP_DAYS, Math.ceil(e.TREND_FILTER_HOURS / 24) + 2),
     poolVersion: e.POOL_VERSION.trim().toUpperCase(),
     symbolRr,
     riskPercent: e.RISK_PERCENT,
     checkExitsAfterImmediateFill: e.CHECK_EXITS_AFTER_IMMEDIATE_FILL,
+    immediateFillAtMarket: e.IMMEDIATE_FILL_AT_MARKET,
+    entryMode: e.STRATEGY_MODE,
+    trendFilterHours: e.TREND_FILTER_HOURS,
+    minStopPct: e.MIN_STOP_PCT,
     startingEquity: e.PAPER_STARTING_EQUITY,
-    feeBps: e.FEE_BPS,
+    takerFeeBps: e.TAKER_FEE_BPS,
+    makerFeeBps: e.MAKER_FEE_BPS,
     slippageBps: e.SLIPPAGE_BPS,
     maxActivePositions: e.MAX_ACTIVE_POSITIONS,
     maxPositionLeverage: e.MAX_POSITION_LEVERAGE,

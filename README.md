@@ -36,9 +36,19 @@ backtest CLI ──→ same PaperPortfolio/engine on CSV klines
 npm ci
 npm run fetch-data -- --from 2025-08-01 --to 2026-08-01          # whole PHASE50 pool → ./data/klines
 npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --out ./bt  # net of costs, shared equity
-npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --gross --isolated   # = Python PHASE48 tables
-npm run backtest  -- --symbols DOGEUSDT,SOLUSDT --fix-immediate-exit --max-total-lev 10
+npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --gross --isolated --python-parity   # = Python PHASE48 tables
+npm run backtest  -- --mode market --trend-hours 336 --min-stop-pct 0.75 --venue futures --split 2026-02-01
 ```
+
+Research grid with a train/test split (mode × trend filter × min stop × RR), ranked by
+train, judged by test:
+
+```bash
+npm run sweep -- --from 2023-08-01 --to 2026-08-01 --split 2025-08-01 --venue futures --out sweep.csv
+```
+
+By default fills are realistic (see quirks 1 and 5 in docs/STRATEGY_SOURCE.md); add
+`--python-parity` to reproduce the Python engine exactly.
 
 Binance Vision monthly CSVs (`<SYMBOL>-15m-YYYY-MM.csv`, µs timestamps) can be dropped
 into `./data/klines` as well. See the header of `src/backtest/cli.ts` for all flags.

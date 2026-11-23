@@ -13,19 +13,29 @@
  */
 
 import {
-  Engine082fLimit1Bar,
+  Engine082f,
   type Bar15m,
   type ClosedTrade,
   type EngineEvent,
   type EntryGuard,
+  type EntryMode,
 } from "../strategy/engine082f.js";
 
 export interface CostModel {
-  /** Fee per side in basis points of notional (Binance spot/margin VIP0: 10 bps). */
-  feeBps: number;
+  /** Taker fee, bps of notional: market entries and SL / reverse / EOD exits. */
+  takerFeeBps: number;
+  /** Maker fee, bps of notional: limit entries and TP (resting limit) exits. */
+  makerFeeBps: number;
   /** Adverse slippage in bps on market-type exits (SL, reverse close, EOD). */
   slippageBps: number;
 }
+
+/** Binance VIP0 presets (no BNB discount). */
+export const VENUE_COSTS: Record<string, CostModel> = {
+  spot: { takerFeeBps: 10, makerFeeBps: 10, slippageBps: 5 },
+  futures: { takerFeeBps: 5, makerFeeBps: 2, slippageBps: 5 },
+  none: { takerFeeBps: 0, makerFeeBps: 0, slippageBps: 0 },
+};
 
 export interface RiskLimits {
   /** Max simultaneously open positions; 0 = unlimited. */
@@ -47,6 +57,10 @@ export interface PortfolioOptions {
   /** Each symbol gets its own equity (reproduces per-symbol research tables). */
   isolated?: boolean;
   checkExitsAfterImmediateFill?: boolean;
+  immediateFillAtMarket?: boolean;
+  entryMode?: EntryMode;
+  trendFilterHours?: number;
+  minStopPct?: number;
   onEvent?: (event: EngineEvent, portfolio: PaperPortfolio) => void;
   /**
    * Idempotent close ledger. Called before equity is updated; return false if this
@@ -63,7 +77,7 @@ export interface NetTrade extends ClosedTrade {
   portfolioEquityAfter: number;
 }
 
-export const NO_COSTS: CostModel = { feeBps: 0, slippageBps: 0 };
+export const NO_COSTS: CostModel = { takerFeeBps: 0, makerFeeBps: 0, slippageBps: 0 };
 export const NO_LIMITS: RiskLimits = {
   maxActivePositions: 0,
   maxPositionLeverage: 0,
@@ -74,7 +88,7 @@ export const NO_LIMITS: RiskLimits = {
 const MARKET_EXITS = new Set(["SL", "SL&TP same bar -> SL", "Reverse divergence close", "EOD close"]);
 
 export class PaperPortfolio {
-  readonly engines = new Map<string, Engine082fLimit1Bar>();
+  readonly engines = new Map<string, Engine082f>();
   equity: number;
   peakEquity: number;
   maxDrawdown = 0;
@@ -88,12 +102,16 @@ export class PaperPortfolio {
     this.equity = opts.startingEquity;
     this.peakEquity = opts.startingEquity;
     for (const [symbol, rr] of Object.entries(opts.symbolRr)) {
-      const engine = new Engine082fLimit1Bar({
+      const engine = new Engine082f({
         symbol,
         rrTarget: rr,
         riskPercent: opts.riskPercent,
         initialCapital: opts.startingEquity,
         checkExitsAfterImmediateFill: opts.checkExitsAfterImmediateFill ?? false,
+        immediateFillAtMarket: opts.immediateFillAtMarket ?? false,
+        entryMode: opts.entryMode ?? "limit1bar",
+        trendFilterHours: opts.trendFilterHours ?? 0,
+        minStopPct: opts.minStopPct ?? 0,
         entryGuard: this.guardFor(symbol),
         onEvent: (e) => this.onEngineEvent(e),
       });
@@ -180,9 +198,12 @@ export class PaperPortfolio {
   }
 
   private applyClose(t: ClosedTrade): void {
-    const { feeBps, slippageBps } = this.opts.costs;
-    const fees = ((t.qty * t.entry + t.qty * t.exitPrice) * feeBps) / 10_000;
-    const slippage = MARKET_EXITS.has(t.outcome) ? (t.qty * t.exitPrice * slippageBps) / 10_000 : 0;
+    const { takerFeeBps, makerFeeBps, slippageBps } = this.opts.costs;
+    const entryBps = t.fillReason === "MARKET" ? takerFeeBps : makerFeeBps;
+    const marketExit = MARKET_EXITS.has(t.outcome);
+    const exitBps = marketExit ? takerFeeBps : makerFeeBps;
+    const fees = (t.qty * t.entry * entryBps + t.qty * t.exitPrice * exitBps) / 10_000;
+    const slippage = marketExit ? (t.qty * t.exitPrice * slippageBps) / 10_000 : 0;
     const netPnl = t.pnl - fees - slippage;
     if (this.opts.closeLedger) {
       const projected = this.opts.isolated
