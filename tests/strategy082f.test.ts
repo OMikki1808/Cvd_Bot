@@ -167,3 +167,11 @@ describe("sides filter", () => {
     expect(eng.trades.every((t) => t.side === "short")).toBe(true);
   });
 });
+
+describe("trend filter units", () => {
+  it("trendFilterHours is real hours on any trigger timeframe", () => {
+    expect(new Engine082f({ symbol: "T", rrTarget: 2, trendFilterHours: 1344, triggerMinutes: 240 }).trendBars).toBe(336);
+    expect(new Engine082f({ symbol: "T", rrTarget: 2, trendFilterHours: 336 }).trendBars).toBe(336);
+    expect(new Engine082f({ symbol: "T", rrTarget: 2, trendFilterHours: 336, triggerMinutes: 15 }).trendBars).toBe(1344);
+  });
+});

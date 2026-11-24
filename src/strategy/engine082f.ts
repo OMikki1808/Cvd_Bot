@@ -181,8 +181,9 @@ export interface EngineOptions {
   /** Default "limit1bar" (production). */
   entryMode?: EntryMode;
   /**
-   * Trend filter (not in the Python engines; 0 = off). Long only if the 1H close is above
-   * the close `trendFilterHours` hourly bars ago, short only if below.
+   * Trend filter (not in the Python engines; 0 = off). Long only if the decision-bar close is
+   * above the close `trendFilterHours` hours ago, short only if below. Converted to bars of the
+   * trigger timeframe (e.g. 1344 h on 4H = 336 bars = 56 days).
    */
   trendFilterHours?: number;
   /** Skip setups whose stop is closer than this % of entry (0 = off). Fees eat tight stops. */
@@ -273,6 +274,8 @@ export class Engine082f {
   readonly entryMode: EntryMode;
   readonly immediateFillAtMarket: boolean;
   readonly trendFilterHours: number;
+  /** trendFilterHours expressed in trigger-timeframe bars. */
+  readonly trendBars: number;
   readonly minStopPct: number;
   readonly triggerMs: number;
   readonly barsPerTrigger: number;
@@ -351,6 +354,7 @@ export class Engine082f {
     this.closeOnLastBar = opts.closeOnLastBar ?? false;
     this.directionFilter = opts.directionFilter;
     this.absorption = opts.absorption;
+    this.trendBars = this.trendFilterHours > 0 ? Math.max(1, Math.round((this.trendFilterHours * 3_600_000) / this.triggerMs)) : 0;
     this.sides = opts.sides ?? "both";
     this.entryGuard = opts.entryGuard;
     this.onEvent = opts.onEvent;
@@ -495,9 +499,9 @@ export class Engine082f {
     }
     this.lastTime = time;
     this.lastClose = close;
-    if (this.trendFilterHours > 0) {
+    if (this.trendBars > 0) {
       this.closesHist.push(close);
-      if (this.closesHist.length > this.trendFilterHours + 1) this.closesHist.shift();
+      if (this.closesHist.length > this.trendBars + 1) this.closesHist.shift();
     }
 
     let bear: DivergenceMeta | null = null;
@@ -663,8 +667,8 @@ export class Engine082f {
     } else if (this.minStopPct > 0 && (Math.abs(entry - stop) / entry) * 100 < this.minStopPct) {
       reason = "MIN_STOP_PCT";
       this.funnel.filteredStop = (this.funnel.filteredStop ?? 0) + 1;
-    } else if (this.trendFilterHours > 0) {
-      const ref = this.closesHist.length > this.trendFilterHours ? this.closesHist[0] : undefined;
+    } else if (this.trendBars > 0) {
+      const ref = this.closesHist.length > this.trendBars ? this.closesHist[0] : undefined;
       const now = this.lastClose;
       const ok = ref !== undefined && (side === "long" ? now > ref : now < ref);
       if (!ok) {

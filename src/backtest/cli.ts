@@ -11,7 +11,7 @@
  *   --rr N                 override RR for all symbols
  *   --from / --to          UTC dates (to is exclusive)
  *   --mode limit1bar|market   limit1bar = production, market = V082F_ENGINE_V2 [limit1bar]
- *   --trend-hours N        long only above / short only below the close N hourly bars ago [0=off]
+ *   --trend-hours N        long only above / short only below the close N hours ago [0=off]
  *   --min-stop-pct X       skip setups with a stop closer than X % [0=off]
  *   --trigger 60|15|30|120|240   decision timeframe in minutes [60]
  *   --structure SPEC       ICT structure filter, e.g. 1d:st+4h:st, 1d:st+~4h:st, 1d:st+-4h:st [off]
