@@ -18,6 +18,7 @@ import type { AppLogger } from "../logging/logger.js";
 import { BinanceKlineStream, BinanceSpotRest, latestClosed15mOpen, MIN15 } from "../exchange/binanceSpot.js";
 import { PaperPortfolio, type NetTrade } from "../portfolio/paperPortfolio.js";
 import type { Bar15m, EngineEvent, EngineState } from "../strategy/engine082f.js";
+import type { MultiTfState } from "../strategy/marketStructure.js";
 import { formatEvent, type Notifier } from "../telegram/telegramNotifier.js";
 import { sleep } from "../retry/retry.js";
 
@@ -56,6 +57,10 @@ export class PaperRuntime {
       entryMode: config.entryMode,
       trendFilterHours: config.trendFilterHours,
       minStopPct: config.minStopPct,
+      triggerMinutes: config.triggerMinutes,
+      closeOnLastBar: true,
+      structureSpec: config.structureSpec,
+      absorption: config.absorption,
       closeLedger: (t) =>
         this.db.recordClose(t, {
           startingEquity: this.config.startingEquity,
@@ -166,12 +171,16 @@ export class PaperRuntime {
       this.logger.error({ err, symbol, source, openTime: bar.openTime }, "bar_processing_failed");
       const saved = this.db.loadEngineState(symbol);
       if (saved) engine.loadState(saved as EngineState);
+      const savedStructure = this.db.loadEngineState(`${symbol}#structure`);
+      if (savedStructure) this.portfolio.structures.get(symbol)?.loadState(savedStructure as MultiTfState);
       this.portfolio.syncEngines();
       return "out_of_order";
     } finally {
       engine.setRecoveryMode(false);
     }
     this.db.saveEngineState(symbol, engine.dumpState());
+    const structure = this.portfolio.structures.get(symbol);
+    if (structure) this.db.saveEngineState(`${symbol}#structure`, structure.dumpState());
     this.saveAccount();
     return "accepted";
   }
@@ -228,6 +237,8 @@ export class PaperRuntime {
       if (!state) continue;
       try {
         engine.loadState(state as EngineState);
+        const st = this.db.loadEngineState(`${symbol}#structure`);
+        if (st) this.portfolio.structures.get(symbol)?.loadState(st as MultiTfState);
         this.logger.info(
           { symbol, last15m: engine.last15mOpenTime, position: !!engine.position, pending: !!engine.pendingLimit },
           "engine_state_restored",
@@ -251,6 +262,8 @@ export class PaperRuntime {
   private persistAll(): void {
     for (const [symbol, engine] of this.portfolio.engines) {
       this.db.saveEngineState(symbol, engine.dumpState());
+      const structure = this.portfolio.structures.get(symbol);
+      if (structure) this.db.saveEngineState(`${symbol}#structure`, structure.dumpState());
     }
     this.saveAccount();
   }

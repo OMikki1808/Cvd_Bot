@@ -141,6 +141,18 @@ export type EngineEvent =
   | { type: "PositionClosed"; symbol: string; time: number; trade: ClosedTrade };
 
 /** Optional execution-layer guard (leverage / max positions). Not part of the Python oracle. */
+/**
+ * Absorption on the confirmation bar: aggressive flow AGAINST the trade that price absorbed.
+ * long:  delta < 0 (sellers hit the bid) yet the bar closes in the upper part of its range;
+ * short: delta > 0 (buyers lift the offer) yet the bar closes in the lower part.
+ * |delta| must be at least `minDeltaRatio` × average |delta| of the last `lookback` bars.
+ */
+export interface AbsorptionOptions {
+  minDeltaRatio: number;
+  minCloseLocation: number;
+  lookback: number;
+}
+
 export type EntryGuard = (req: {
   symbol: string;
   side: Side;
@@ -175,6 +187,24 @@ export interface EngineOptions {
   trendFilterHours?: number;
   /** Skip setups whose stop is closer than this % of entry (0 = off). Fees eat tight stops. */
   minStopPct?: number;
+  /**
+   * Decision ("trigger") timeframe in minutes, built from 15m bars: 15, 30, 60 (default, = Python), 120, 240.
+   * All rules (CVD, pivots, divergence, confirmation, limit validity, SL/TP checks) run on this timeframe.
+   */
+  triggerMinutes?: number;
+  /**
+   * Close the trigger bar as soon as its last 15m bar arrives (realistic, no 15-minute decision lag).
+   * Python waits for the first 15m bar of the next period. Same trade sequence on clean data;
+   * differs only when a gap follows a complete bar (Python then drops the complete bar).
+   */
+  closeOnLastBar?: boolean;
+  /**
+   * External direction filter (e.g. higher-timeframe market structure). Called at decision time
+   * with the side and the decision bar time; return a reason string to block the setup.
+   */
+  directionFilter?: (side: Side, time: number) => string | null;
+  /** Absorption confirmation (market mode); see AbsorptionOptions. Off when undefined. */
+  absorption?: AbsorptionOptions;
   entryGuard?: EntryGuard;
   onEvent?: (event: EngineEvent) => void;
 }
@@ -193,6 +223,9 @@ interface HourBar {
   open: number;
   close: number;
   cvd: number;
+  high?: number;
+  low?: number;
+  delta?: number;
 }
 
 export interface EngineState {
@@ -239,6 +272,11 @@ export class Engine082f {
   readonly immediateFillAtMarket: boolean;
   readonly trendFilterHours: number;
   readonly minStopPct: number;
+  readonly triggerMs: number;
+  readonly barsPerTrigger: number;
+  readonly closeOnLastBar: boolean;
+  readonly absorption: AbsorptionOptions | undefined;
+  directionFilter: ((side: Side, time: number) => string | null) | undefined;
   entryGuard: EntryGuard | undefined;
   onEvent: ((event: EngineEvent) => void) | undefined;
 
@@ -267,6 +305,8 @@ export class Engine082f {
     untrustedHours: 0,
     filteredTrend: 0,
     filteredStop: 0,
+    filteredStructure: 0,
+    filteredAbsorption: 0,
   };
 
   private readonly cvdAcc = new CvdAccumulator();
@@ -301,6 +341,13 @@ export class Engine082f {
     this.immediateFillAtMarket = opts.immediateFillAtMarket ?? false;
     this.trendFilterHours = opts.trendFilterHours ?? 0;
     this.minStopPct = opts.minStopPct ?? 0;
+    const tm = opts.triggerMinutes ?? 60;
+    if (![15, 30, 60, 120, 240].includes(tm)) throw new Error(`triggerMinutes must be 15/30/60/120/240, got ${tm}`);
+    this.triggerMs = tm * 60_000;
+    this.barsPerTrigger = this.triggerMs / MIN15;
+    this.closeOnLastBar = opts.closeOnLastBar ?? false;
+    this.directionFilter = opts.directionFilter;
+    this.absorption = opts.absorption;
     this.entryGuard = opts.entryGuard;
     this.onEvent = opts.onEvent;
     this.equity = this.initialCapital;
@@ -320,7 +367,7 @@ export class Engine082f {
 
   on15mBar(bar: Bar15m): void {
     const ts = bar.openTime;
-    const hour = hourOpen(ts);
+    const hour = Math.floor(ts / this.triggerMs) * this.triggerMs;
     if (this.last15mMs !== null && ts - this.last15mMs !== MIN15) {
       this.hourTrusted = false;
       this.emit({
@@ -343,6 +390,10 @@ export class Engine082f {
     }
     this.hourBars.push({ ...bar });
     this.tryFillPendingLimit(bar);
+    if (this.closeOnLastBar && ts + MIN15 === hour + this.triggerMs) {
+      this.closeCurrentHour();
+      this.hourBars = [];
+    }
   }
 
   /** Close the forming hour and liquidate everything (end of backtest). */
@@ -356,7 +407,7 @@ export class Engine082f {
     if (order === null || this.position !== null) {
       return;
     }
-    const currHour = hourOpen(bar.openTime);
+    const currHour = Math.floor(bar.openTime / this.triggerMs) * this.triggerMs;
     if (currHour <= order.orderPlacedTime || currHour > order.expiryTime) {
       return;
     }
@@ -381,13 +432,13 @@ export class Engine082f {
         contiguous = false;
       }
     }
-    if (bars.length !== 4 || !this.hourTrusted || !contiguous) {
+    if (bars.length !== this.barsPerTrigger || !this.hourTrusted || !contiguous) {
       this.funnel.untrustedHours = (this.funnel.untrustedHours ?? 0) + 1;
       this.emit({
         type: "DataUntrusted",
         symbol: this.symbol,
         time: this.currentHourMs,
-        reason: bars.length !== 4 || !this.hourTrusted ? "HOUR_NOT_COMPLETE_OR_UNTRUSTED" : "NON_CONTIGUOUS_15M",
+        reason: bars.length !== this.barsPerTrigger || !this.hourTrusted ? "HOUR_NOT_COMPLETE_OR_UNTRUSTED" : "NON_CONTIGUOUS_15M",
         detail: { barsSeen: bars.length },
       });
       return;
@@ -407,7 +458,7 @@ export class Engine082f {
       (bars[0] as Bar15m).open,
       high,
       low,
-      (bars[3] as Bar15m).close,
+      (bars[bars.length - 1] as Bar15m).close,
       volume,
       takerBuy,
     );
@@ -432,8 +483,8 @@ export class Engine082f {
     takerBuyBase: number,
   ): void {
     const i = this.index;
-    const { cvd } = this.cvdAcc.update(volume, takerBuyBase);
-    this.bars.push({ time, open, close, cvd });
+    const { cvd, delta } = this.cvdAcc.update(volume, takerBuyBase);
+    this.bars.push({ time, open, close, cvd, high, low, delta });
     if (this.bars.length > BAR_BUFFER) {
       this.bars.shift();
       this.barsOffset += 1;
@@ -563,7 +614,7 @@ export class Engine082f {
     const stop = side === "long" ? pending.divLow : pending.divHigh;
     const rpu = side === "long" ? entry - stop : stop - entry;
     if (rpu <= 1e-12) return;
-    if (this.filtered(side, entry, stop, time)) return;
+    if (this.filtered(side, entry, stop, time, this.index - 1)) return;
     const riskCash = this.equity * (this.riskPercent / 100);
     let qty = riskCash / rpu;
     if (qty <= 0) return;
@@ -597,9 +648,12 @@ export class Engine082f {
   }
 
   /** Optional filters (trend, min stop). Returns true if the setup must be skipped. */
-  private filtered(side: Side, entry: number, stop: number, time: number): boolean {
+  private filtered(side: Side, entry: number, stop: number, time: number, confirmIdx: number): boolean {
     let reason: string | null = null;
-    if (this.minStopPct > 0 && (Math.abs(entry - stop) / entry) * 100 < this.minStopPct) {
+    if (this.absorption && !this.isAbsorption(side, confirmIdx)) {
+      reason = "NO_ABSORPTION";
+      this.funnel.filteredAbsorption = (this.funnel.filteredAbsorption ?? 0) + 1;
+    } else if (this.minStopPct > 0 && (Math.abs(entry - stop) / entry) * 100 < this.minStopPct) {
       reason = "MIN_STOP_PCT";
       this.funnel.filteredStop = (this.funnel.filteredStop ?? 0) + 1;
     } else if (this.trendFilterHours > 0) {
@@ -611,9 +665,42 @@ export class Engine082f {
         this.funnel.filteredTrend = (this.funnel.filteredTrend ?? 0) + 1;
       }
     }
+    if (reason === null && this.directionFilter) {
+      const blocked = this.directionFilter(side, time);
+      if (blocked !== null) {
+        reason = blocked;
+        this.funnel.filteredStructure = (this.funnel.filteredStructure ?? 0) + 1;
+      }
+    }
     if (reason === null) return false;
     this.emit({ type: "SetupFiltered", symbol: this.symbol, side, time, reason });
     return true;
+  }
+
+  private isAbsorption(side: Side, confirmIdx: number): boolean {
+    const a = this.absorption;
+    if (!a) return true;
+    const bar = this.bars[confirmIdx - this.barsOffset];
+    if (!bar || bar.delta === undefined || bar.high === undefined || bar.low === undefined) return false;
+    const start = Math.max(this.barsOffset, confirmIdx - a.lookback);
+    let sum = 0;
+    let n = 0;
+    for (let k = start; k < confirmIdx; k++) {
+      const d = this.bars[k - this.barsOffset]?.delta;
+      if (d !== undefined) {
+        sum += Math.abs(d);
+        n += 1;
+      }
+    }
+    if (n === 0) return false;
+    const avg = sum / n;
+    const range = bar.high - bar.low;
+    if (range <= 0) return false;
+    const loc = (bar.close - bar.low) / range;
+    const against = side === "long" ? bar.delta < 0 : bar.delta > 0;
+    const strong = Math.abs(bar.delta) >= a.minDeltaRatio * avg;
+    const closeOk = side === "long" ? loc >= a.minCloseLocation : 1 - loc >= a.minCloseLocation;
+    return against && strong && closeOk;
   }
 
   private processDivergence(i: number, side: Side, meta: DivergenceMeta, time: number): void {
@@ -672,7 +759,7 @@ export class Engine082f {
     if (this.position !== null || this.pendingLimit !== null) {
       return;
     }
-    if (this.filtered(side, limitPrice, meta.currPriceExtreme, now)) {
+    if (this.filtered(side, limitPrice, meta.currPriceExtreme, now, meta.currPivotIndex + 1)) {
       return;
     }
     const order: PendingLimitOrder = {
@@ -683,7 +770,7 @@ export class Engine082f {
       limitPrice,
       stop: meta.currPriceExtreme,
       rr: this.rrTarget,
-      expiryTime: now + HOUR,
+      expiryTime: now + this.triggerMs,
       expiryIdx: i + 1,
       meta,
     };

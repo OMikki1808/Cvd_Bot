@@ -17,7 +17,7 @@ export const envSchema = z.object({
   BINANCE_SPOT_WS_URL: z.string().url().default("wss://stream.binance.com:9443"),
   WS_INBOUND_TIMEOUT_SEC: z.coerce.number().positive().default(90),
   HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
-  WARMUP_DAYS: z.coerce.number().int().min(1).max(60).default(7),
+  WARMUP_DAYS: z.coerce.number().int().min(1).max(500).default(7),
 
   // Strategy (frozen pool from CVDBot-prodaction).
   POOL_VERSION: z.string().default(DEFAULT_POOL_VERSION),
@@ -32,6 +32,13 @@ export const envSchema = z.object({
   RR_ALL: z.coerce.number().min(0).default(0),
   TREND_FILTER_HOURS: z.coerce.number().int().min(0).default(0),
   MIN_STOP_PCT: z.coerce.number().min(0).default(0),
+  /** Decision timeframe in minutes (60 = Python). */
+  TRIGGER_MINUTES: z.coerce.number().int().default(60),
+  /** ICT structure filter, e.g. "1d:st+4h:st" (empty = off). */
+  STRUCTURE_FILTER: z.string().optional().default(""),
+  ABSORPTION: bool,
+  ABSORPTION_MIN_DELTA_RATIO: z.coerce.number().min(0).default(1),
+  ABSORPTION_MIN_CLOSE_LOCATION: z.coerce.number().min(0).max(1).default(0.5),
 
   // Paper account.
   PAPER_STARTING_EQUITY: z.coerce.number().positive().default(10_000),
@@ -67,6 +74,9 @@ export interface AppConfig {
   entryMode: "limit1bar" | "market";
   trendFilterHours: number;
   minStopPct: number;
+  triggerMinutes: number;
+  structureSpec: string;
+  absorption: { minDeltaRatio: number; minCloseLocation: number; lookback: number } | undefined;
   startingEquity: number;
   takerFeeBps: number;
   makerFeeBps: number;
@@ -112,7 +122,12 @@ export function parseConfig(env: NodeJS.ProcessEnv): AppConfig {
     wsInboundTimeoutMs: e.WS_INBOUND_TIMEOUT_SEC * 1000,
     httpTimeoutMs: e.HTTP_TIMEOUT_MS,
     // The trend filter needs TREND_FILTER_HOURS of history before it lets anything through.
-    warmupDays: Math.max(e.WARMUP_DAYS, Math.ceil(e.TREND_FILTER_HOURS / 24) + 2),
+    // and the structure filter needs enough higher-timeframe swings.
+    warmupDays: Math.max(
+      e.WARMUP_DAYS,
+      Math.ceil(e.TREND_FILTER_HOURS / 24) + 2,
+      e.STRUCTURE_FILTER.includes("1w") ? 400 : e.STRUCTURE_FILTER.includes("1d") ? 120 : e.STRUCTURE_FILTER.includes("4h") ? 30 : 0,
+    ),
     poolVersion: e.POOL_VERSION.trim().toUpperCase(),
     symbolRr,
     riskPercent: e.RISK_PERCENT,
@@ -121,6 +136,11 @@ export function parseConfig(env: NodeJS.ProcessEnv): AppConfig {
     entryMode: e.STRATEGY_MODE,
     trendFilterHours: e.TREND_FILTER_HOURS,
     minStopPct: e.MIN_STOP_PCT,
+    triggerMinutes: e.TRIGGER_MINUTES,
+    structureSpec: e.STRUCTURE_FILTER.trim(),
+    absorption: e.ABSORPTION
+      ? { minDeltaRatio: e.ABSORPTION_MIN_DELTA_RATIO, minCloseLocation: e.ABSORPTION_MIN_CLOSE_LOCATION, lookback: 20 }
+      : undefined,
     startingEquity: e.PAPER_STARTING_EQUITY,
     takerFeeBps: e.TAKER_FEE_BPS,
     makerFeeBps: e.MAKER_FEE_BPS,

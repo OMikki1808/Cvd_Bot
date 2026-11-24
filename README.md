@@ -40,11 +40,11 @@ npm run backtest  -- --from 2025-08-01 --to 2026-08-01 --gross --isolated --pyth
 npm run backtest  -- --mode market --trend-hours 336 --min-stop-pct 0.75 --venue futures --split 2026-02-01
 ```
 
-Research grid with a train/test split (mode × trend filter × min stop × RR), ranked by
-train, judged by test:
+Research grid (mode × trigger TF × ICT structure filter × trend × min stop × absorption × RR,
+672 combos by default, ~30 min for 35 symbols × 3 years) with train / test / holdout periods:
 
 ```bash
-npm run sweep -- --from 2023-08-01 --to 2026-08-01 --split 2025-08-01 --venue futures --out sweep.csv
+npm run sweep -- --from 2023-08-01 --to 2026-08-01 --split 2025-02-01 --holdout 2025-11-01 --venue futures --out sweep.csv
 ```
 
 By default fills are realistic (see quirks 1 and 5 in docs/STRATEGY_SOURCE.md); add

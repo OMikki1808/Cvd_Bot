@@ -19,7 +19,9 @@ import {
   type EngineEvent,
   type EntryGuard,
   type EntryMode,
+  type AbsorptionOptions,
 } from "../strategy/engine082f.js";
+import { MultiTfStructure } from "../strategy/marketStructure.js";
 
 export interface CostModel {
   /** Taker fee, bps of notional: market entries and SL / reverse / EOD exits. */
@@ -61,6 +63,12 @@ export interface PortfolioOptions {
   entryMode?: EntryMode;
   trendFilterHours?: number;
   minStopPct?: number;
+  triggerMinutes?: number;
+  closeOnLastBar?: boolean;
+  /** ICT structure filter, e.g. "1d:st+4h:st" (see marketStructure.ts). */
+  structureSpec?: string;
+  structureStrength?: number;
+  absorption?: AbsorptionOptions;
   onEvent?: (event: EngineEvent, portfolio: PaperPortfolio) => void;
   /**
    * Idempotent close ledger. Called before equity is updated; return false if this
@@ -89,6 +97,7 @@ const MARKET_EXITS = new Set(["SL", "SL&TP same bar -> SL", "Reverse divergence 
 
 export class PaperPortfolio {
   readonly engines = new Map<string, Engine082f>();
+  readonly structures = new Map<string, MultiTfStructure>();
   equity: number;
   peakEquity: number;
   maxDrawdown = 0;
@@ -102,6 +111,8 @@ export class PaperPortfolio {
     this.equity = opts.startingEquity;
     this.peakEquity = opts.startingEquity;
     for (const [symbol, rr] of Object.entries(opts.symbolRr)) {
+      const structure = new MultiTfStructure(opts.structureSpec ?? "", opts.structureStrength ?? 1);
+      if (structure.active) this.structures.set(symbol, structure);
       const engine = new Engine082f({
         symbol,
         rrTarget: rr,
@@ -112,6 +123,10 @@ export class PaperPortfolio {
         entryMode: opts.entryMode ?? "limit1bar",
         trendFilterHours: opts.trendFilterHours ?? 0,
         minStopPct: opts.minStopPct ?? 0,
+        triggerMinutes: opts.triggerMinutes ?? 60,
+        closeOnLastBar: opts.closeOnLastBar ?? false,
+        absorption: opts.absorption,
+        directionFilter: structure.active ? (side) => structure.check(side) : undefined,
         entryGuard: this.guardFor(symbol),
         onEvent: (e) => this.onEngineEvent(e),
       });
@@ -146,6 +161,7 @@ export class PaperPortfolio {
     if (!this.opts.isolated) {
       engine.equity = this.equity;
     }
+    this.structures.get(symbol)?.on15mBar(bar);
     engine.on15mBar(bar);
   }
 

@@ -49,6 +49,19 @@ Parity fixture: 9 scenarios, 337 trades, all exact.
 - `TREND_FILTER_HOURS` / `--trend-hours N`: long only if the 1H close is above the close N hourly bars ago, short only if below.
 - `MIN_STOP_PCT` / `--min-stop-pct X`: skip setups whose stop is closer than X % (fees eat tight stops).
 
+## Research extensions (not in Python, all off by default)
+
+- **Trigger timeframe** `TRIGGER_MINUTES` / `--trigger`: 15, 30, 60 (Python), 120, 240. Every rule runs on that timeframe.
+- **ICT market structure filter** `STRUCTURE_FILTER` / `--structure` (`src/strategy/marketStructure.ts`):
+  STH/ITH/LTH and STL/ITL/LTL per ICT on 1h/4h/1d/1w (built from 15m, used only once closed),
+  trend per level = last break of structure. Terms joined with `+`:
+  `1d:st` must agree, `~4h:st` must not be against, `-4h:st` must be against (pullback).
+- **Absorption** `ABSORPTION` / `--absorption`: on the confirmation bar, delta against the trade
+  with |delta| ≥ ratio × average of 20 bars, while the bar closes in the favourable half.
+- **Decision without the 15-minute lag** (`closeOnLastBar`, default in runtime/backtest): Python only closes
+  the hour when the first 15m bar of the next hour arrives, so live decisions come 15 minutes late.
+- `tests/structure.test.ts` proves no lookahead: changing the data after time T never changes trades closed before T.
+
 ## Known quirks of the Python engine (kept for parity)
 
 1. **No SL/TP check on the bar after an `IMMEDIATE_FILL`.** Python sets

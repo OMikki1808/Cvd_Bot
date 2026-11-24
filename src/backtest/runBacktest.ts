@@ -1,4 +1,4 @@
-import type { Bar15m, EntryMode } from "../strategy/engine082f.js";
+import type { AbsorptionOptions, Bar15m, EntryMode } from "../strategy/engine082f.js";
 import { PaperPortfolio, type CostModel, type NetTrade, type RiskLimits } from "../portfolio/paperPortfolio.js";
 
 export interface BacktestInput {
@@ -14,6 +14,10 @@ export interface BacktestInput {
   trendFilterHours?: number;
   minStopPct?: number;
   immediateFillAtMarket?: boolean;
+  triggerMinutes?: number;
+  closeOnLastBar?: boolean;
+  structureSpec?: string;
+  absorption?: AbsorptionOptions;
 }
 
 export interface SymbolStats {
@@ -61,6 +65,10 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     checkExitsAfterImmediateFill: input.checkExitsAfterImmediateFill,
     entryMode: input.entryMode ?? "limit1bar",
     immediateFillAtMarket: input.immediateFillAtMarket ?? false,
+    triggerMinutes: input.triggerMinutes ?? 60,
+    closeOnLastBar: input.closeOnLastBar ?? false,
+    structureSpec: input.structureSpec ?? "",
+    absorption: input.absorption,
     trendFilterHours: input.trendFilterHours ?? 0,
     minStopPct: input.minStopPct ?? 0,
   });
@@ -120,7 +128,11 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       maxDrawdown: dd,
       untrustedHours: eng?.funnel.untrustedHours ?? 0,
       rejected: eng?.funnel.entriesRejected ?? 0,
-      filtered: (eng?.funnel.filteredTrend ?? 0) + (eng?.funnel.filteredStop ?? 0),
+      filtered:
+        (eng?.funnel.filteredTrend ?? 0) +
+        (eng?.funnel.filteredStop ?? 0) +
+        (eng?.funnel.filteredStructure ?? 0) +
+        (eng?.funnel.filteredAbsorption ?? 0),
       avgR: ts.length ? ts.reduce((a, t) => a + t.netPnl / (Math.abs(t.entry - t.stop) * t.qty), 0) / ts.length : 0,
     };
   });

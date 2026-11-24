@@ -124,6 +124,45 @@ describe("PaperRuntime", () => {
     expect(rt2.portfolio.trades.length).toBeGreaterThan(0);
   });
 
+  it("15m trigger + structure filter + absorption: stop/restart == continuous run", async () => {
+    const cfg = parseConfig({
+      SYMBOLS: SYMBOLS.join(","),
+      WARMUP_DAYS: String(WARMUP_DAYS),
+      DATABASE_PATH: ":memory:",
+      STRATEGY_MODE: "market",
+      TRIGGER_MINUTES: "15",
+      STRUCTURE_FILTER: "4h:st+~1h:it",
+      ABSORPTION: "true",
+      ABSORPTION_MIN_DELTA_RATIO: "0.5",
+    });
+    cfg.warmupDays = WARMUP_DAYS;
+    const until = LIVE_FROM + 3000 * MIN15;
+    const mid = LIVE_FROM + 1700 * MIN15 + 3 * MIN15;
+
+    const dbA = new AppDatabase(":memory:", logger);
+    const sA = new FakeStream();
+    const a = new PaperRuntime(cfg, logger, dbA, fakeRest, sA as never, { notify: noop }, () => LIVE_FROM + MIN15);
+    await a.start();
+    await drive(a, sA, LIVE_FROM, until);
+
+    const dbB = new AppDatabase(":memory:", logger);
+    const s1 = new FakeStream();
+    const b1 = new PaperRuntime(cfg, logger, dbB, fakeRest, s1 as never, { notify: noop }, () => LIVE_FROM + MIN15);
+    await b1.start();
+    await drive(b1, s1, LIVE_FROM, mid);
+    await b1.stop();
+    const s2 = new FakeStream();
+    const b2 = new PaperRuntime(cfg, logger, dbB, fakeRest, s2 as never, { notify: noop }, () => mid);
+    await b2.start();
+    await drive(b2, s2, mid, until);
+
+    const key = (t: { setupId: string; exitTime: number; netPnl: number }) => [t.setupId, t.exitTime, t.netPnl];
+    expect(a.portfolio.trades.length).toBeGreaterThan(3);
+    expect(b1.portfolio.trades.concat(b2.portfolio.trades).map(key)).toEqual(a.portfolio.trades.map(key));
+    expect(b2.portfolio.equity).toBe(a.portfolio.equity);
+    expect(a.portfolio.engines.get("DOGEUSDT")?.funnel.filteredStructure).toBeGreaterThan(0);
+  });
+
   it("close ledger is idempotent", () => {
     const db = new AppDatabase(":memory:", logger);
     const t = {
