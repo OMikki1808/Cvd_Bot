@@ -69,6 +69,7 @@ export interface PortfolioOptions {
   structureSpec?: string;
   structureStrength?: number;
   absorption?: AbsorptionOptions;
+  sides?: "both" | "long" | "short";
   onEvent?: (event: EngineEvent, portfolio: PaperPortfolio) => void;
   /**
    * Idempotent close ledger. Called before equity is updated; return false if this
@@ -126,6 +127,7 @@ export class PaperPortfolio {
         triggerMinutes: opts.triggerMinutes ?? 60,
         closeOnLastBar: opts.closeOnLastBar ?? false,
         absorption: opts.absorption,
+        sides: opts.sides ?? "both",
         directionFilter: structure.active ? (side) => structure.check(side) : undefined,
         entryGuard: this.guardFor(symbol),
         onEvent: (e) => this.onEngineEvent(e),

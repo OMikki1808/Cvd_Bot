@@ -61,6 +61,7 @@ export class PaperRuntime {
       closeOnLastBar: true,
       structureSpec: config.structureSpec,
       absorption: config.absorption,
+      sides: config.sides,
       closeLedger: (t) =>
         this.db.recordClose(t, {
           startingEquity: this.config.startingEquity,

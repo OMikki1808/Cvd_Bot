@@ -203,6 +203,8 @@ export interface EngineOptions {
    * with the side and the decision bar time; return a reason string to block the setup.
    */
   directionFilter?: (side: Side, time: number) => string | null;
+  /** Allowed trade directions (default both). */
+  sides?: "both" | "long" | "short";
   /** Absorption confirmation (market mode); see AbsorptionOptions. Off when undefined. */
   absorption?: AbsorptionOptions;
   entryGuard?: EntryGuard;
@@ -276,6 +278,7 @@ export class Engine082f {
   readonly barsPerTrigger: number;
   readonly closeOnLastBar: boolean;
   readonly absorption: AbsorptionOptions | undefined;
+  readonly sides: "both" | "long" | "short";
   directionFilter: ((side: Side, time: number) => string | null) | undefined;
   entryGuard: EntryGuard | undefined;
   onEvent: ((event: EngineEvent) => void) | undefined;
@@ -348,6 +351,7 @@ export class Engine082f {
     this.closeOnLastBar = opts.closeOnLastBar ?? false;
     this.directionFilter = opts.directionFilter;
     this.absorption = opts.absorption;
+    this.sides = opts.sides ?? "both";
     this.entryGuard = opts.entryGuard;
     this.onEvent = opts.onEvent;
     this.equity = this.initialCapital;
@@ -650,7 +654,10 @@ export class Engine082f {
   /** Optional filters (trend, min stop). Returns true if the setup must be skipped. */
   private filtered(side: Side, entry: number, stop: number, time: number, confirmIdx: number): boolean {
     let reason: string | null = null;
-    if (this.absorption && !this.isAbsorption(side, confirmIdx)) {
+    if (this.sides !== "both" && this.sides !== side) {
+      reason = "SIDE_DISABLED";
+      this.funnel.filteredSide = (this.funnel.filteredSide ?? 0) + 1;
+    } else if (this.absorption && !this.isAbsorption(side, confirmIdx)) {
       reason = "NO_ABSORPTION";
       this.funnel.filteredAbsorption = (this.funnel.filteredAbsorption ?? 0) + 1;
     } else if (this.minStopPct > 0 && (Math.abs(entry - stop) / entry) * 100 < this.minStopPct) {

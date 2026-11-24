@@ -15,6 +15,7 @@
  *   --min-stop-pct X       skip setups with a stop closer than X % [0=off]
  *   --trigger 60|15|30|120|240   decision timeframe in minutes [60]
  *   --structure SPEC       ICT structure filter, e.g. 1d:st+4h:st, 1d:st+~4h:st, 1d:st+-4h:st [off]
+ *   --sides both|long|short   allowed directions [both]
  *   --absorption           require absorption on the confirmation bar (|delta|>=1x avg20, close in favourable half)
  *   --split DATE           also report trades before / after DATE separately (out-of-sample check)
  *   --equity N [10000]  --risk PCT [1]
@@ -80,6 +81,7 @@ const result = runBacktest({
   triggerMinutes: num(args, "trigger", 60),
   closeOnLastBar: !args.has("python-parity"),
   structureSpec: args.get("structure") ?? "",
+  sides: (args.get("sides") ?? "both") as "both" | "long" | "short",
   absorption: args.has("absorption") ? { minDeltaRatio: num(args, "abs-ratio", 1), minCloseLocation: num(args, "abs-close", 0.5), lookback: 20 } : undefined,
 });
 

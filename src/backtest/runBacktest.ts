@@ -18,6 +18,7 @@ export interface BacktestInput {
   closeOnLastBar?: boolean;
   structureSpec?: string;
   absorption?: AbsorptionOptions;
+  sides?: "both" | "long" | "short";
 }
 
 export interface SymbolStats {
@@ -69,6 +70,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     closeOnLastBar: input.closeOnLastBar ?? false,
     structureSpec: input.structureSpec ?? "",
     absorption: input.absorption,
+    sides: input.sides ?? "both",
     trendFilterHours: input.trendFilterHours ?? 0,
     minStopPct: input.minStopPct ?? 0,
   });

@@ -44,6 +44,7 @@ const trends = list("trend", "0,336").map(Number);
 const minStops = list("min-stop", "0,0.5,0.75").map(Number);
 const absorptions = list("absorption", "0,1").map(Number);
 const rrs = list("rrs", "2,3");
+const sides = (args.get("sides") ?? "both") as "both" | "long" | "short";
 const ABSORPTION = { minDeltaRatio: 1, minCloseLocation: 0.5, lookback: 20 };
 const costs = costsFromArgs(args);
 const pythonParity = args.has("python-parity");
@@ -82,7 +83,7 @@ for (const [mode, trigger, structure, trendH, minStop, absorption, rr] of combos
           bars, symbolRr, startingEquity: 10_000, riskPercent: 1, costs, limits: NO_LIMITS,
           isolated: true, checkExitsAfterImmediateFill: !pythonParity, immediateFillAtMarket: !pythonParity, entryMode: mode, trendFilterHours: trendH, minStopPct: minStop,
           triggerMinutes: trigger, closeOnLastBar: !pythonParity, structureSpec: structure === "none" ? "" : structure,
-          absorption: absorption ? ABSORPTION : undefined,
+          absorption: absorption ? ABSORPTION : undefined, sides,
         });
         const train = stats(res.trades.filter((t) => t.entryTime < split));
         const testTrades = res.trades.filter((t) => t.entryTime >= split && t.entryTime < holdout);

@@ -37,6 +37,7 @@ export const envSchema = z.object({
   /** ICT structure filter, e.g. "1d:st+4h:st" (empty = off). */
   STRUCTURE_FILTER: z.string().optional().default(""),
   ABSORPTION: bool,
+  SIDES: z.enum(["both", "long", "short"]).default("both"),
   ABSORPTION_MIN_DELTA_RATIO: z.coerce.number().min(0).default(1),
   ABSORPTION_MIN_CLOSE_LOCATION: z.coerce.number().min(0).max(1).default(0.5),
 
@@ -76,6 +77,7 @@ export interface AppConfig {
   minStopPct: number;
   triggerMinutes: number;
   structureSpec: string;
+  sides: "both" | "long" | "short";
   absorption: { minDeltaRatio: number; minCloseLocation: number; lookback: number } | undefined;
   startingEquity: number;
   takerFeeBps: number;
@@ -138,6 +140,7 @@ export function parseConfig(env: NodeJS.ProcessEnv): AppConfig {
     minStopPct: e.MIN_STOP_PCT,
     triggerMinutes: e.TRIGGER_MINUTES,
     structureSpec: e.STRUCTURE_FILTER.trim(),
+    sides: e.SIDES,
     absorption: e.ABSORPTION
       ? { minDeltaRatio: e.ABSORPTION_MIN_DELTA_RATIO, minCloseLocation: e.ABSORPTION_MIN_CLOSE_LOCATION, lookback: 20 }
       : undefined,

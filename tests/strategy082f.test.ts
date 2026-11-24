@@ -157,3 +157,13 @@ describe("filters and market mode", () => {
     expect(a.trades.concat(b2.trades)).toEqual(ref.trades);
   });
 });
+
+describe("sides filter", () => {
+  it("short-only never opens longs", () => {
+    const eng = new Engine082f({ symbol: "T", rrTarget: 2, entryMode: "market", sides: "short" });
+    generate(7, 12000, 0, 0.006).forEach((b) => eng.on15mBar(b));
+    eng.flush();
+    expect(eng.trades.length).toBeGreaterThan(0);
+    expect(eng.trades.every((t) => t.side === "short")).toBe(true);
+  });
+});
